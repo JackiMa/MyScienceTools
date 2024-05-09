@@ -19,7 +19,7 @@ class InterpolationFunction:
         return self.func(x)
     
 class myInterpolation:
-    def __init__(self, fileName, skiprows=None, sep = ',',smooth_window=5, plot=False, isregularize='none'):
+    def __init__(self, fileName, skiprows=None, sep = None,smooth_window=5, plot=False, isregularize='none'):
         """
         初始化参数
 
@@ -35,7 +35,7 @@ class myInterpolation:
         self.skiprows = skiprows
         self.smooth_window = smooth_window
         self.plot = plot
-        self.sep = sep
+        self.sep = sep if sep is not None else '[;,;，；。\t]'
         self.isregularize = isregularize
 
         baseName = os.path.basename(self.fileName)
@@ -75,10 +75,19 @@ class myInterpolation:
         self.data = pd.DataFrame({0: x, 1: y})
 
     def read_file(self):
-        # 读取文件并对数据进行分组平均
-        self.data = pd.read_csv(self.fileName, header=None, skiprows=self.skiprows, sep = self.sep)
-        self.data = self.data.groupby(0, as_index=False).mean()
-        
+        try:
+            # 尝试读取文件并对数据进行分组平均
+            self.data = pd.read_csv(self.fileName, header=None, skiprows=self.skiprows, sep=self.sep, engine='python')
+            self.data = self.data.groupby(0, as_index=False).mean()
+        except Exception as e:
+            # 如果读取文件失败，打印文件的前10行
+            with open(self.fileName, 'r') as file:
+                lines = file.readlines()[:10]
+            print("First 10 lines of the file:")
+            print("".join(lines))
+            
+            # 重新抛出异常
+            raise Exception(f"打开文件{self.fileName}错误")
 
     def smooth_data(self):
         # 在做变换之前，保存原始数据
