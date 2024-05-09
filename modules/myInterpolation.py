@@ -1,6 +1,6 @@
 # version 1.0 2024年5月9日
 
-# 
+# 修改了打开文件的逻辑，能自动处理一些sep，并且打开出错时会显示文件前10行
 
 import pandas as pd
 import numpy as np
