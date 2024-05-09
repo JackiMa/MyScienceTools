@@ -1,8 +1,23 @@
+# version 1.0 2024年5月9日
+
+# 
+
 import pandas as pd
 import numpy as np
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
+import os
 
+class InterpolationFunction:
+    def __init__(self, x, y, kind, name):
+        self.func = interp1d(x, y, kind=kind)
+        self.name = name
+        # Copy all attributes from the interp1d object to this object
+        self.__dict__.update(self.func.__dict__)
+
+    def __call__(self, x):
+        return self.func(x)
+    
 class myInterpolation:
     def __init__(self, fileName, skiprows=None, sep = ',',smooth_window=5, plot=False, isregularize='none'):
         """
@@ -22,6 +37,18 @@ class myInterpolation:
         self.plot = plot
         self.sep = sep
         self.isregularize = isregularize
+
+        baseName = os.path.basename(self.fileName)
+        self.name, _ = os.path.splitext(baseName)
+
+
+        # 自动执行一些操作
+        self.read_file()
+        if self.isregularize != 'none':
+            print(f"Data normalization method is {self.isregularize}.")
+            self.scidata_process()
+        self.smooth_data()
+        self.do_interpolat()
 
 
     def scidata_process(self):
@@ -68,7 +95,7 @@ class myInterpolation:
         # 然后，删除所有的非数字（NaN）值
         self.data = self.data.dropna()
         # 最后，进行插值
-        self.interpolation = interp1d(self.data[0], self.data[1], kind='cubic')
+        self.interpolation = InterpolationFunction(self.data[0], self.data[1], kind='cubic', name=self.name)
 
     def getInterpolation(self):
         # 获取插值函数
@@ -93,12 +120,7 @@ class myInterpolation:
 
     def process(self):
         # 执行所有步骤
-        self.read_file()
-        if self.isregularize != 'none':
-            print(f"Data normalization method is {self.isregularize}.")
-            self.scidata_process()
-        self.smooth_data()
-        self.do_interpolat()
+
         self.plot_data()
         return self.getInterpolation() # 返回插值函数
 
@@ -122,5 +144,7 @@ def calculate_weighted_average(func1, func2):
 
     # 计算加权的func2值的平均值
     average_weighted_func2 = np.mean(weighted_func2_values)
+
+    print(f"The average of {func2.name} weighted by {func1.name} is: {average_weighted_func2}")
 
     return average_weighted_func2
