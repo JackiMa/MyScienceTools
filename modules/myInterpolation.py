@@ -1,5 +1,9 @@
-# version 1.0 2024年5月9日
+# version 1.1 2024年6月14日
+# 修改了读取数据的方法，和之前不再兼容。增加自动识别的模块
+# 修改了测试代码，使之更清晰
+# 增加了插值函数默认值，外推值为0，避免报错
 
+# version 1.0 2024年5月9日
 # 修改了打开文件的逻辑，能自动处理一些sep，并且打开出错时会显示文件前10行
 
 import pandas as pd
@@ -17,9 +21,90 @@ class InterpolationFunction:
 
     def __call__(self, x):
         return self.func(x)
+
+class ReadData:
+    def __init__(self, fileName, skiprows=None, sep = None):
+        self.fileName = fileName
+        self.skiprows = skiprows
+        self.sep = sep
+
+        baseName = os.path.basename(self.fileName)
+        self.name, _ = os.path.splitext(baseName)
+
+        self.read_file()
+
+    def auto_read(self):
+        def is_number(s):
+            try:
+                float(s)
+                return True
+            except ValueError:
+                return False
     
+        try:
+            with open(self.fileName, 'r', encoding='utf-8') as file:
+                lines = file.readlines()
+
+            # Find the first line of data
+            for i in range(len(lines) - 2):
+                if is_number(lines[i][0]) and is_number(lines[i+1][0]) and is_number(lines[i+2][0]):
+                    start_line = i
+                    break
+
+            # read the data
+            seps = [',', '\t', ' ', ';']
+            successful_sep = None
+            for sep in seps:
+                try:
+                    self.data = pd.read_csv(self.fileName, header=None, skiprows=start_line, sep=sep, engine='python')
+                    if self.data.shape[1] >= 2:  # Ensure there are at least two columns
+                        successful_sep = sep
+                        break
+                except pd.errors.ParserError:
+                    continue
+            # print(self.data)
+            print(f"Successfully auto read {self.fileName} using separator '{successful_sep}', data shape is {self.data.shape}")
+
+        except Exception as e:
+            # 如果读取文件失败，打印文件的前10行
+            with open(self.fileName, 'r', encoding='utf-8') as file:
+                lines = file.readlines()[:10]
+            print("First 10 lines of the file:")
+            print("".join(lines))
+            
+            # 重新抛出异常
+            raise Exception(f"an Error occured when auto read {self.fileName}\n please try manual read.")
+
+    def manual_read(self):
+        try:
+            # 尝试读取文件并对数据进行分组平均
+            self.data = pd.read_csv(self.fileName, header=None, skiprows=self.skiprows, sep=self.sep, engine='python')
+        except Exception as e:
+            # 如果读取文件失败，打印文件的前10行
+            with open(self.fileName, 'r', encoding='utf-8') as file:
+                lines = file.readlines()[:10]
+            print("First 10 lines of the file:")
+            print("".join(lines))
+            
+            # 重新抛出异常
+            raise Exception(f"an error occured reading {self.fileName}, please set the right skiprows and sep.")
+
+    def read_file(self):
+        if self.skiprows is None or self.sep is None:
+            self.auto_read()
+        else:
+            self.manual_read()
+
+        return self.name, self.data
+
+    def get_data(self):
+        return self.data
+
+    def get_name(self):
+        return self.name
+
 class myInterpolation:
-    def __init__(self, fileName, skiprows=None, sep = None,smooth_window=5, plot=False, isregularize='none'):
+    def __init__(self, data ,smooth_window=5, plot=False, isregularize='none'):
         """
         初始化参数
 
@@ -31,11 +116,10 @@ class myInterpolation:
             plot (bool, optional): 是否绘制图像. Defaults to False.
             isregularize (str, optional): 数据规范化的方法，可选值为'MaxY', 'Area', 'MinMax', 'Z-Score', 'TotalY', 'none'. Defaults to 'none'.
         """
-        self.fileName = fileName
-        self.skiprows = skiprows
+        self.fileName = data.get_name()
+        self.data = data.get_data()
         self.smooth_window = smooth_window
         self.plot = plot
-        self.sep = sep if sep is not None else '[;,;，；。\t]'
         self.isregularize = isregularize
 
         baseName = os.path.basename(self.fileName)
@@ -43,7 +127,12 @@ class myInterpolation:
 
 
         # 自动执行一些操作
-        self.read_file()
+        # If the last column is empty, drop it
+        if self.data.iloc[:, -1].isnull().all():
+            self.data = self.data.dropna(axis=1, how='all')
+        # If there are repeated x values, take the average of the y values
+        self.data = self.data.groupby(0, as_index=False).mean()
+
         if self.isregularize != 'none':
             print(f"Data normalization method is {self.isregularize}.")
             self.scidata_process()
@@ -74,21 +163,6 @@ class myInterpolation:
         # 更新self.data
         self.data = pd.DataFrame({0: x, 1: y})
 
-    def read_file(self):
-        try:
-            # 尝试读取文件并对数据进行分组平均
-            self.data = pd.read_csv(self.fileName, header=None, skiprows=self.skiprows, sep=self.sep, engine='python')
-            self.data = self.data.groupby(0, as_index=False).mean()
-        except Exception as e:
-            # 如果读取文件失败，打印文件的前10行
-            with open(self.fileName, 'r') as file:
-                lines = file.readlines()[:10]
-            print("First 10 lines of the file:")
-            print("".join(lines))
-            
-            # 重新抛出异常
-            raise Exception(f"打开文件{self.fileName}错误")
-
     def smooth_data(self):
         # 在做变换之前，保存原始数据
         self.rawdata = self.data.copy()
@@ -104,7 +178,7 @@ class myInterpolation:
         # 然后，删除所有的非数字（NaN）值
         self.data = self.data.dropna()
         # 最后，进行插值
-        self.interpolation = InterpolationFunction(self.data[0], self.data[1], kind='cubic', name=self.name)
+        self.interpolation = InterpolationFunction(self.data[0], self.data[1], kind='cubic', name=self.name, fill_value='0', bounds_error=False)
 
     def getInterpolation(self):
         # 获取插值函数
@@ -151,9 +225,21 @@ def calculate_weighted_average(func1, func2):
     # 计算加权的func2的值
     weighted_func2_values = np.trapz(func1(x) * func2(x),x) / np.trapz(func1(x), x)
 
-    # 计算加权的func2值的平均值
-    average_weighted_func2 = np.mean(weighted_func2_values)
+    print(f"The average of {func2.name} weighted by {func1.name} is: {weighted_func2_values}")
 
-    print(f"The average of {func2.name} weighted by {func1.name} is: {average_weighted_func2}")
+    return weighted_func2_values
 
-    return average_weighted_func2
+if __name__ == '__main__':
+    # 测试代码
+    # 读取两个文件
+    QE = 'MyScienceTools\spectrum\QE\QE_R6233_03.csv'
+    EM = 'MyScienceTools\spectrum\scintillator_实测\Em_GAGG140ns.txt'
+
+    # ReadData(QE) # auto read
+    # ReadData(QE, sep='\t', skiprows=10) # manual read
+    # 创建两个插值对象
+    inter1 = myInterpolation(ReadData(EM), plot=False,smooth_window=1).process()
+    inter2 = myInterpolation(ReadData(QE), plot=False,smooth_window=1)
+
+    # # 计算加权平均值
+    calculate_weighted_average(inter1, inter2.getInterpolation())
