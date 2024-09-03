@@ -264,7 +264,7 @@ class SpectrumAnalyzer:
 
         self.data_width = self.xdata[right_index] - self.xdata[left_index]
         # 计算这个范围的长度的1%
-        sigma = (right_index - left_index) * 0.01
+        sigma = (right_index - left_index) * 0.2
         logging.debug(f"\nthe filter used sigma = {sigma}")
         return sigma 
 

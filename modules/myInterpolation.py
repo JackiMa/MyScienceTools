@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 import os
 
 class InterpolationFunction:
-    def __init__(self, x, y, kind, name):
-        self.func = interp1d(x, y, kind=kind)
+    def __init__(self, x, y, kind, name,fill_value='0', bounds_error=False):
+        self.func = interp1d(x, y, kind=kind,fill_value=fill_value, bounds_error=bounds_error)
         self.name = name
         # Copy all attributes from the interp1d object to this object
         self.__dict__.update(self.func.__dict__)
