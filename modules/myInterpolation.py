@@ -13,9 +13,11 @@ import matplotlib.pyplot as plt
 import os
 
 class InterpolationFunction:
-    def __init__(self, x, y, kind, name,fill_value='0', bounds_error=False):
-        self.func = interp1d(x, y, kind=kind,fill_value=fill_value, bounds_error=bounds_error)
-        self.name = name
+    def __init__(self, *args, **kwargs):
+        # Remove 'name' from kwargs if present and save it, otherwise default to None
+        self.name = kwargs.pop('name', None)
+        # Now, args and kwargs do not contain 'name', so they can be safely passed to interp1d
+        self.func = interp1d(*args, **kwargs)
         # Copy all attributes from the interp1d object to this object
         self.__dict__.update(self.func.__dict__)
 
