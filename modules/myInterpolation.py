@@ -30,19 +30,29 @@ class InterpolationFunction:
     def __call__(self, x):
         return self.func(x)
 
-    def __mul__(self, other):
+    def _apply_operation(self, other, operation):
         if isinstance(other, (float, int)):
-            # 放缩 y 值
-            new_y = self.y * other
-            # 创建新的 InterpolationFunction 对象，复制所有参数
-            new_kwargs = {k: v for k, v in self.__dict__.items() if k in ['kind', 'axis', 'copy', 'bounds_error', 'fill_value', 'assume_sorted']}
-            new_func = InterpolationFunction(self.x, new_y, **new_kwargs)
-            return new_func
+            new_y = operation(self.y, other)
+        elif isinstance(other, InterpolationFunction):
+            new_y = operation(self.y, other.y)
         else:
-            raise TypeError("Unsupported operand type(s) for *: 'InterpolationFunction' and '{}'".format(type(other).__name__))
+            raise TypeError(f"Unsupported operand type(s) for operation: 'InterpolationFunction' and '{type(other).__name__}'")
+
+        new_kwargs = {k: v for k, v in self.__dict__.items() if k in ['kind', 'axis', 'copy', 'bounds_error', 'fill_value', 'assume_sorted']}
+        new_func = InterpolationFunction(self.x, new_y, **new_kwargs)
+        return new_func
+
+    def __mul__(self, other):
+        return self._apply_operation(other, lambda x, y: x * y)
 
     def __rmul__(self, other):
         return self.__mul__(other)
+
+    def __add__(self, other):
+        return self._apply_operation(other, lambda x, y: x + y)
+
+    def __sub__(self, other):
+        return self._apply_operation(other, lambda x, y: x - y)
 
 class ReadData:
     def __init__(self, fileName, skiprows=None, sep = None):
@@ -227,21 +237,37 @@ class myInterpolation:
         self.plot_data()
         return self.getInterpolation() # 返回插值函数
 
-    def __mul__(self, other):
+    def _apply_operation(self, other, operation):
         if isinstance(other, (float, int)):
-            # 放缩 y 值
             new_data = self.data.copy()
-            new_data[1] *= other
-            # 返回新的 myInterpolation 对象
-            new_interpolation = myInterpolation(source_data=self.source_data, smooth_window=self.smooth_window, plot=self.plot, isregularize=self.isregularize)
-            new_interpolation.data = new_data
-            new_interpolation.do_interpolat()
-            return new_interpolation
+            new_data[1] = operation(new_data[1], other)
+        elif isinstance(other, myInterpolation):
+            new_data = self.data.copy()
+            new_data[1] = operation(new_data[1], other.data[1])
         else:
-            raise TypeError("Unsupported operand type(s) for *: 'myInterpolation' and '{}'".format(type(other).__name__))
+            raise TypeError(f"Unsupported operand type(s) for operation: 'myInterpolation' and '{type(other).__name__}'")
+
+        new_interpolation = myInterpolation(
+            source_data=self.source_data,
+            smooth_window=self.smooth_window,
+            plot=self.plot,
+            isregularize=self.isregularize
+        )
+        new_interpolation.data = new_data
+        new_interpolation.do_interpolat()
+        return new_interpolation
+
+    def __mul__(self, other):
+        return self._apply_operation(other, lambda x, y: x * y)
 
     def __rmul__(self, other):
         return self.__mul__(other)
+
+    def __add__(self, other):
+        return self._apply_operation(other, lambda x, y: x + y)
+
+    def __sub__(self, other):
+        return self._apply_operation(other, lambda x, y: x - y)
 
 
 def calculate_weighted_average(func1, func2):
@@ -275,8 +301,7 @@ if __name__ == '__main__':
     # ReadData(QE) # auto read
     # ReadData(QE, sep='\t', skiprows=10) # manual read
     # 创建两个插值对象
-    inter1 = myInterpolation(ReadData(EM), plot=False,smooth_window=1)
+    inter1 = myInterpolation(ReadData(EM), plot=False,smooth_window=1)*2
     inter2 = myInterpolation(ReadData(QE), plot=False,smooth_window=1).process()
-
     # # 计算加权平均值
     calculate_weighted_average(inter1.getInterpolation(), inter2)
