@@ -231,9 +231,10 @@ class SpectrumAnalyzer:
     使用LecroyData获取数据文件，并自动分析能谱，寻峰
 
     '''
-    def __init__(self, data_dir, detector = Detector(name = "R6233", type = "PMT"), crystal = None):
+    def __init__(self, data_dir, detector = Detector(name = "R6233", type = "PMT"), crystal = None, filter_window = 1):
         self.data_dir = data_dir
         self.xdata, self.ydata, self.unitX, self.unitY = LeCroyDATA(data_dir).get_data()
+        self.ydata =  np.convolve(self.ydata , np.ones(filter_window) / filter_window, mode='same')
         self.detector = detector
         self.crystal = crystal
 
