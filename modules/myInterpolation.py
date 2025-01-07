@@ -216,16 +216,14 @@ class myInterpolation:
         return self.interpolation
 
     def plot_data(self):
-        # 如果需要，绘制原始数据和插值曲线
-        if self.plot:
-            plt.figure(figsize=(10, 6))
-            plt.title('Interpolation of data: ' + self.fileName)
-            plt.plot(self.rawdata[0], self.rawdata[1], 'o', label='Original data')
-            plt.plot(self.data[0], self.interpolation(self.data[0]), '-', label='Interpolated curve')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            plt.legend()
-            plt.show()
+        plt.figure(figsize=(10, 6))
+        plt.title('Interpolation of data: ' + self.fileName)
+        plt.plot(self.rawdata[0], self.rawdata[1], 'o', label='Original data')
+        plt.plot(self.data[0], self.interpolation(self.data[0]), '-', label='Interpolated curve')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.legend()
+        plt.show()
 
     def save_file(self, new_file_name=None):
         # 如果需要，保存处理后的数据到新的文件
@@ -234,7 +232,8 @@ class myInterpolation:
 
     def process(self):
         # 执行所有步骤
-        self.plot_data()
+        if self.plot:
+            self.plot_data()
         return self.getInterpolation() # 返回插值函数
 
     def _apply_operation(self, other, operation):
