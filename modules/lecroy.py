@@ -1,145 +1,198 @@
-# version 1.0.4
-# 2024-04-25
+"""
+LeCroy Data Processing Package
+
+Features:
+1. Read LeCroy oscilloscope waveform and spectrum data
+2. Auto-adjust units and scales based on data type
+3. Visualization for waveforms and spectra
+4. Peak finding and Gaussian fitting
+5. Auto-detection of data types
+6. Support for logarithmic axis display
+
+Usage:
+- Read and display waveform/spectrum:
+  data = LeCroyDATA('file_path.txt')
+  data.plot(save_path=None, logPlot='logY')
+
+- Get processed data:
+  x, y, unitX, unitY = data.get_data()
+
+- Find and fit peaks in a specific range:
+  analyzer = SpectrumAnalyzer('spectrum_file.txt')
+  analyzer.fit_peak(fit_range=[2000, 2500])
+  
+- Find and fit all peaks:
+  analyzer = SpectrumAnalyzer('spectrum_file.txt')
+  analyzer.plot_with_fit('save_path.png')
+  
+- Plot waveform without fitting:
+  analyzer = SpectrumAnalyzer('waveform_file.txt')
+  analyzer.plot(logPlot='logY')  # Optional: logPlot = 'logX', 'logY', 'logXY'
+"""
+
+# Version 2.0.0
+# 2025-4-3
 # Author: Ge Ma
 
-# 修订记录 2024年4月25日
-# 1. 增加了画对数图的功能，在画图代码中使用命令 logPlot = 'logX', 'logY', 'logXY'
-
-# 修订记录 2024年4月13日
-# 1. 修改了画图相关代码，让箭头的位置更加合适
-# 2. 修改画图相关代码，使所有画图代码都能在无文件名时直接show
-# 3. 修改了对detector的指定，避免有时没有指定detector的报错
-# 4. 修改部分局部方法，使之无法从外部访问，增加代码补全的可靠性
-
-# 修改记录 2024年4月9日
-# 1. 修改了画图的代码，适用wave_save() 可以直接画图：如果没有指定保存文件名，就直接show
-
-# 修改记录 2024年2月25日
-# 1. 增加了保存全部波形而不拟合的选项
-# 2. 修改推断文件是能谱还是波形的bug
-
-
-# 修改记录 2024-01-28
-# 1. 修改了接受峰的判断条件，目前只在峰>3时再判断。其实应当将各种判据都糅合起来统一判断
-# 2. 将chi2/ndof的值写成了具体是多少chi2/ndof，而不是给出化简后的值。注意，这一步修改了很多关于chi2，ndof传值的过程，可能有bug。比如将chi2_by_ndof,替换成了chi2, ndof,
-
+# 修订记录
+# 重构代码
 
 import re
 import numpy as np
 import matplotlib.pyplot as plt
 import os 
 import scienceplots
-from matplotlib import font_manager 
-font = font_manager.FontProperties(fname=r'C:\Windows\Fonts\segoeui.ttf')
-font_manager.fontManager.addfont('C:\\Windows\\Fonts\\segoeui.ttf')
-plt.rcParams['font.family'] = 'Segoe UI'  # 使用的字体名字需要和字体文件中的名字匹配
+from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
+from scipy.ndimage import gaussian_filter1d
+
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+from my_plot_style import *
 
 
-def get_datalist(data_dir, file_type = ['txt']):
+def get_datalist(data_dir, file_type=['txt']):
+    """获取指定目录下的所有符合类型的数据文件"""
     datalists = []
     for root, dirs, files in os.walk(data_dir):
         for file in files:
             for ftype in file_type:
                 if file.endswith(ftype):
                     datalists.append(os.path.join(root, file))
-
-
     return datalists
 
 class LeCroyDATA:
-    '''
-    读取LeCroy的数据文件，返回数据和文件名， 可以画图，常见用法：
-    data = LeCroyDATA('F7--PMT--00000.txt')
-    data.draw_figure(save_path = None)
-    获取数据：data.get_data()
-    获取原始数据: data.get_rawdata()
-    '''
-    def __init__(self, data_dir, delimiters= [',', '\t', ' ', ';'], skiprows=5, xfactor = None, yfactor=1, isSpectrum = None):
+    """
+    读取LeCroy的数据文件，返回数据和文件名，可以画图。
+    
+    参数:
+    data_dir (str): 数据文件路径
+    delimiters (list): 尝试使用的分隔符列表
+    skiprows (int): 跳过文件头的行数
+    xfactor (float, optional): x轴数据的比例因子
+    yfactor (float): y轴数据的比例因子
+    isSpectrum (bool, optional): 是否为能谱数据
+    
+    使用方法:
+    data = LeCroyDATA('文件路径.txt')
+    data.plot(save_path=None, logPlot='logY')
+    """
+    def __init__(self, data_dir, delimiters=[',', '\t', ' ', ';'], skiprows=5, xfactor=None, yfactor=1, isSpectrum=None):
         self.data_dir = data_dir
         self.delimiters = delimiters
         self.skiprows = skiprows
-        self.raw_data = self.LeCroy_data_read()
-        self.data = self.LeCroy_data_read()
+        self.raw_data = self._LeCroy_data_read()
+        self.data = self.raw_data.copy() if self.raw_data is not None else None
         self.title = self.get_name()
+        self.metrics = self._get_metrics()
         self.xfactor = xfactor
         self.yfactor = yfactor
+        self.is_lecroy = False
+        self.device = None
+        self.data_type = None
+        self.acquisition_time = None
+        self.bins = None
+        
+        # 存储处理后的数据
+        self.processed_data = None
+        self.processed_x = None
+        self.processed_y = None
+        self.unitX = None
+        self.unitY = None
+        
+        # 尝试解析LeCroy文件头
+        self._parse_lecroy_header()
+        
+        # 自动判断数据类型
         if isSpectrum is not None:
-            # 可以通过文件名来指定是否是能谱还是波形
             self.isSpectrum = isSpectrum
         else:
-            if os.path.basename(self.data_dir).startswith('F'):
-                self.isSpectrum = True
-            elif os.path.basename(self.data_dir).startswith('C'):
-                self.isSpectrum = False
+            if self.is_lecroy:
+                self.isSpectrum = (self.data_type == 'Histogram')
             else:
-                print("Unknown data type. Please check the file name. The default type is spectrum")
-                self.isSpectrum = True
+                # 非LeCroy数据，根据数据特征判断
+                if len(self.data) > 0 and len(self.data[0]) == 2:
+                    # 检查数据是否看起来像能谱（离散的y值）
+                    y_values = self.data[:, 1]
+                    unique_y = np.unique(y_values)
+                    if len(unique_y) < len(y_values) * 0.1:  # 如果y值重复较多，可能是能谱
+                        self.isSpectrum = True
+                    else:
+                        self.isSpectrum = False
 
-    def LeCroy_data_read(self):
+
+        # 初始化处理一次数据
+        self.process_data()
+
+    def _parse_lecroy_header(self):
+        """解析LeCroy文件头信息"""
+        try:
+            with open(self.data_dir, 'r') as f:
+                lines = f.readlines()
+                if len(lines) >= 5:
+                    # 解析第一行：设备信息
+                    first_line = lines[0].strip().split()
+                    if len(first_line) >= 3:
+                        self.device = first_line[0]
+                        self.data_type = first_line[2]
+                        self.is_lecroy = True
+                    
+                    # 解析第四行：采数时间
+                    if len(lines) >= 4:
+                        time_line = lines[3].strip()
+                        time_match = re.search(r'(\d+\.?\d*)\s*(s|ms|us|ns|ps)', time_line)
+                        if time_match:
+                            value, unit = time_match.groups()
+                            value = float(value)
+                            if unit == 'ms':
+                                value *= 1e-3
+                            elif unit == 'us':
+                                value *= 1e-6
+                            elif unit == 'ns':
+                                value *= 1e-9
+                            elif unit == 'ps':
+                                value *= 1e-12
+                            self.acquisition_time = value
+        except Exception as e:
+            print(f"Warning: Could not parse LeCroy header: {str(e)}")
+            self.is_lecroy = False
+
+    def _LeCroy_data_read(self):
+        """读取LeCroy数据文件，尝试不同的分隔符"""
         for delimiter in self.delimiters:
             try:
                 data = np.loadtxt(self.data_dir, skiprows=self.skiprows, delimiter=delimiter)
-                self.raw_data = data
                 break
             except ValueError:
                 pass
         else:
-            print(f"Failed to read file {self.data_dir} with provided delimiters.")
-            return
+            print(f"Warning: Could not read file {self.data_dir} with provided delimiters.")
+            return None
 
         if data.ndim != 2 or data.shape[1] != 2:
-            print(f"Data in file {self.data_dir} is not 2D. Returning the first 6 rows of the original data.")
+            print(f"Warning: Data in file {self.data_dir} is not 2D. Returning first 6 rows.")
             return data[:6]
 
         return data
 
-    def scidata_process(self, isregularize = 'none'):
-
-        unitX = ''
-        unitY = ''
-        if self.isSpectrum: # handle the spectrum histogram data
-            unitY = 'counts'
-            if self.xfactor is None: # if xfactor is not set, use the auto-generated xfactor
-                deltaX = self.data[3,0] - self.data[2,0]
-                if deltaX < 1E-12:
-                    self.xfactor = 1E12
-                    unitX = 'Areas [pV·s]'
-                elif deltaX < 1E-7:
-                    self.xfactor = 1E9
-                    unitX = 'Areas [nV·s]'
-                elif deltaX < 1E-3: # 1E-7 < deltaX < 1E-3, 只有时间尺度在us量级才容易有这样的结果
-                    self.xfactor = 1
-                    unitX = 'Areas [μV·s]'
-                elif deltaX < 1:  # 比较大的值肯定是以V为单位了
-                    self.xfactor = 1E3
-                    unitX = 'Voltage [mV]'
-                else:
-                    self.xfactor = 1
-                    unitX = 'Voltage [V]'
-        else:
-            unitY = 'voltage [V]'
-            if self.xfactor is None: # if xfactor is not set, use the auto-generated xfactor
-                deltaX = self.data[3,0] - self.data[2,0]
-                if deltaX < 1E-12:
-                    self.xfactor = 1E12
-                    unitX = 'Time [ps]'
-                elif deltaX < 1E-7:
-                    self.xfactor = 1E9
-                    unitX = 'Time [ns]'
-                elif deltaX < 1E-3: 
-                    self.xfactor = 1E6
-                    unitX = 'Time [μs]'
-                elif deltaX < 1:
-                    self.xfactor = 1E3
-                    unitX = 'Time [ms]'
-                else:
-                    self.xfactor = 1
-                    unitX = 'Time [s]'
-
-
+    def process_data(self, isregularize='none', rebin_factor=None):
+        """处理数据，每次处理都基于原始数据"""
+        if self.raw_data is None:
+            return None, None, None, None
+            
+        # 数据处理总是从原始数据开始
+        self.data = self.raw_data.copy()
+        
+        # 确定适当的单位
+        self._determine_units()
+        
+        # 处理数据
         x = self.data[:,0] * self.xfactor
         y = self.data[:,1] * self.yfactor
 
+        # 归一化处理
         if isregularize == 'MaxY':
             y = y / np.max(y)
         elif isregularize == 'Area':
@@ -152,94 +205,197 @@ class LeCroyDATA:
             y = y / np.sum(y)
         elif isregularize != 'none':
             print(f"Unknown normalization method {isregularize}, no normalization applied.")
+        
+        # Rebin处理（仅针对能谱）
+        if self.isSpectrum and rebin_factor is not None:
+            if self.bins is None:
+                self.bins = len(x) // rebin_factor if rebin_factor else len(x)
+            
+            # 这里我们不实际重新分bin，只是设置bins参数，在绘图时使用
+            
+        # 存储处理后的数据
+        self.processed_x = x
+        self.processed_y = y
+        self.processed_data = np.column_stack((x, y))
+        
+        return x, y, self.unitX, self.unitY
 
-        return x, y, unitX, unitY
+    def _determine_units(self):
+        """确定适当的单位"""
+        if self.isSpectrum:  # 能谱数据处理
+            self.unitY = 'counts'
+            if self.xfactor is None:  # 自动判断
+                deltaX = self.data[3,0] - self.data[2,0]
+                if deltaX < 1E-12:
+                    self.xfactor = 1E12
+                    self.unitX = 'Areas [pV$\\cdot$s]'
+                elif deltaX < 1E-7:
+                    self.xfactor = 1E9
+                    self.unitX = 'Areas [nV$\\cdot$s]'
+                elif deltaX < 1E-3:  # 1E-7 < deltaX < 1E-3
+                    self.xfactor = 1
+                    self.unitX = 'Areas [$\\mu$V$\\cdot$s]'
+                elif deltaX < 1:
+                    self.xfactor = 1E3
+                    self.unitX = 'Voltage [mV]'
+                else:
+                    self.xfactor = 1
+                    self.unitX = 'Voltage [V]'
+        else:  # 波形数据处理
+            self.unitY = 'voltage [V]'
+            if self.xfactor is None:
+                deltaX = self.data[3,0] - self.data[2,0]
+                if deltaX < 1E-12:
+                    self.xfactor = 1E12
+                    self.unitX = 'Time [ps]'
+                elif deltaX < 1E-7:
+                    self.xfactor = 1E9
+                    self.unitX = 'Time [ns]'
+                elif deltaX < 1E-3: 
+                    self.xfactor = 1E6
+                    self.unitX = 'Time [$\\mu$s]'
+                elif deltaX < 1:
+                    self.xfactor = 1E3
+                    self.unitX = 'Time [ms]'
+                else:
+                    self.xfactor = 1
+                    self.unitX = 'Time [s]'
 
-    def draw_figure(self, isregularize='none', rebin_factor=10, fontsize = 14, save_path = None):
-        print("regularize method: ", isregularize)
-        x, y, unitX, unitY = self.scidata_process(isregularize)
-        plt.figure()
+    def scidata_process(self, isregularize='none', rebin_factor=None):
+        """处理数据并返回处理后的数据"""
+        return self.process_data(isregularize, rebin_factor)
+
+    def plot(self, isregularize='none', rebin_factor=10, save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), **kwargs):
+        """Plot waveform or spectrum
+        
+        Parameters:
+        -----------
+        isregularize : str, optional
+            Normalization method ('none', 'MaxY', 'Area', 'MinMax', 'Z-Score', 'TotalY')
+        rebin_factor : int, optional
+            Factor to rebin the data (only for spectra)
+        save_path : str, optional
+            Path to save the plot
+        logPlot : str, optional
+            Log scale setting ('logY', 'logX', 'logXY', or False)
+        title : str, optional
+            Custom title for the plot (if None, no title will be shown)
+        style : list or str, optional
+            Matplotlib style to use (e.g. ['science', 'ieee'])
+        figsize : tuple, optional
+            Figure size in inches (width, height)
+        **kwargs : 
+            Additional keyword arguments to pass to plt functions
+        """
+        print("Normalization method: ", isregularize)
+        
+        # 处理数据
+        x, y, unitX, unitY = self.process_data(isregularize, rebin_factor)
+        
+        # Create figure with style
+        fig = setup_figure(figsize=figsize, style=style)
+        
+        # Plot based on data type
         if self.isSpectrum: 
-            bins = len(x) // rebin_factor
-            plt.hist(x, weights=y, bins=bins)  # set bins manually
+            if self.bins is None:
+                self.bins = len(self.data)  # Use number of data points as bins
+            plt.hist(x, weights=y, bins=self.bins, histtype='step', **kwargs)
         else:
-            plt.plot(x, y)
-        plt.xlabel(unitX, fontsize=fontsize+2)
-        plt.ylabel(unitY, fontsize=fontsize+2)
-        plt.title(os.path.basename(self.title))
-        plt.xticks(fontsize=fontsize)
-        plt.yticks(fontsize=fontsize)
+            plt.plot(x, y, **kwargs)
+            
+        # Set labels - 可被后续调用覆盖
+        set_axes_labels(xlabel=unitX, ylabel=unitY, title=title)
+        
+        # Configure additional plot settings
         plt.grid(True, linestyle='--', alpha=0.5)
-        if save_path is None:
-            plt.show()
-        else:
-            plt.savefig(save_path, dpi = 300)
-
+        
+        # Set log scale
+        if logPlot:
+            if logPlot == 'logY':
+                plt.yscale('log')
+            elif logPlot == 'logX':
+                plt.xscale('log')
+            elif logPlot == 'logXY':
+                plt.yscale('log')
+                plt.xscale('log')
+        
+        # 返回当前figure，让用户可以继续自定义
+        return fig, plt.gca()
 
     def get_rawdata(self):
+        """获取原始数据"""
         return self.raw_data
     
-    def get_data(self):
-        x, y, unitX, unitY = self.scidata_process(isregularize = 'none')
-        return x, y, unitX, unitY
+    def get_data(self, processed=True):
+        """获取数据
+        
+        Parameters:
+        -----------
+        processed : bool
+            如果为True，返回处理后的数据；否则返回原始数据
+        """
+        if processed:
+            if self.processed_x is None or self.processed_y is None:
+                self.process_data()
+            return self.processed_x, self.processed_y, self.unitX, self.unitY
+        else:
+            # 返回原始数据
+            x = self.raw_data[:,0]
+            y = self.raw_data[:,1]
+            return x, y, None, None
 
     def get_name(self):
+        """获取文件名"""
         return self.data_dir.split('\\')[-1]
 
-class Detector:
-    '''
-    record the basic information about detector
-    SiPM
-    PMT
-    SiPIN
-    '''
-    def __init__(self, name = "S3590", type = "SiPD", gain = 1, resolution = 0.1, efficiency_spectrum = 1):
-        self.name = name
-        self.type = type
-        self.gain = gain
-        self.resolution = resolution
-        self.efficiency_spectrum = efficiency_spectrum
-    
-class Crystal:
-    '''
-    record the basic information about crystal
-    '''
-    def __init__(self, name = "GAGG", type = "scintillator", density = 6.63, light_yield = 54, decay_time = 88, emission_spectrum = 1):
-        self.name = name
-        self.type = type
-        self.density = density
-        self.light_yield = light_yield
-        self.decay_time = decay_time
-        self.emission_spectrum = emission_spectrum
+    def _get_metrics(self):
+        """从文件名中提取相关信息"""
+        metrics = {}
+        temperature_match = re.search(r'tmp(n?\d+)', self.title)
+        if temperature_match:
+            metrics['temperature'] = temperature_match.group(1)
+            if 'n' in metrics['temperature']:  # 负温度
+                metrics['temperature'] = '-' + metrics['temperature'].replace('n', '')
+        # 这里可以添加更多信息的提取
+        return metrics
 
-
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
-from scipy.optimize import curve_fit
-from scipy.ndimage import gaussian_filter1d
-import logging
-import os
-import shutil
-
-logging.getLogger('matplotlib').setLevel(logging.WARNING)  # 单独设置matplotlib的日志等级，不要显示查询字体的信息
+    def set_bins(self, bins=None):
+        """设置能谱的bin数量"""
+        if self.isSpectrum:
+            if bins is None:
+                # 使用原始数据的分bin方式
+                self.bins = len(self.data)
+            else:
+                self.bins = bins
+        else:
+            print("Warning: set_bins() is only applicable for spectrum data.")
 
 class SpectrumAnalyzer:
-    '''
-    使用LecroyData获取数据文件，并自动分析能谱，寻峰
-
-    '''
-    def __init__(self, data_dir, detector = Detector(name = "R6233", type = "PMT"), crystal = None):
+    """
+    使用LeCroyDATA获取数据文件，并分析能谱、寻峰、拟合
+    
+    参数:
+    data_dir (str): 数据文件路径
+    sigma (float, optional): 自定义sigma值
+    
+    使用方法:
+    analyzer = SpectrumAnalyzer('能谱文件路径.txt')
+    analyzer.fit_peak(fit_range=[2000, 2500])
+    analyzer.plot_with_fit('保存路径.png')
+    analyzer.plot(logPlot='logY')
+    """
+    def __init__(self, data_dir, sigma=None):
         self.data_dir = data_dir
-        self.xdata, self.ydata, self.unitX, self.unitY = LeCroyDATA(data_dir).get_data()
-        self.detector = detector
-        self.crystal = crystal
+        self.lecroy_data = LeCroyDATA(data_dir)
+        self.xdata, self.ydata, self.unitX, self.unitY = self.lecroy_data.get_data(processed=True)
+        self.peaks_index = None
+        self.data_width = None
+        self.sigma = sigma  # 自定义sigma值
+        self.isSpectrum = self.lecroy_data.isSpectrum
+        self.fitted_peaks = {} # 存储拟合后的峰位，key为峰位，value为(popt, perr)
 
-    def getFilterSigma(self):
-        # 根据数据结构找到合适的滤波参数sigma
-        # 计算xdata的重心
+    def _getFilterSigma(self):
+        """根据数据结构找到合适的滤波参数sigma"""
         spectrum = self.ydata
         centroid = np.average(self.xdata, weights=spectrum)
 
@@ -253,7 +409,6 @@ class SpectrumAnalyzer:
         left_index = right_index = centroid_index
         delta_step = len(self.xdata) // 200
         while count_sum < sum(spectrum) * 0.95:
-            # logging.debug(f"left_index = {left_index}, right_index = {right_index}, count_sum = {count_sum}, count_sum/sum(spectrum) = {count_sum/sum(spectrum)}")
             if left_index > delta_step:
                 left_index -= delta_step
             if right_index < len(self.xdata) - delta_step:
@@ -262,573 +417,483 @@ class SpectrumAnalyzer:
                 break
             count_sum = sum(spectrum[left_index:right_index+1])
 
+        # 始终计算数据宽度，无论是否使用自定义sigma
         self.data_width = self.xdata[right_index] - self.xdata[left_index]
-        # 计算这个范围的长度的1%
+        
+        # 使用自定义sigma或计算sigma
+        if self.sigma is not None:
+            return self.sigma
+        
+        # 计算滤波参数
         sigma = (right_index - left_index) * 0.2
-        logging.debug(f"\nthe filter used sigma = {sigma}")
-        return sigma 
+        return sigma
 
-    def gaussian(self, x, amplitude, mean, stddev):
+    def _gaussian(self, x, amplitude, mean, stddev):
+        """高斯函数"""
         return amplitude * np.exp(-((x - mean)**2 / (2 * stddev**2)))
 
-    def gaussian_plus_linear(self, x, amplitude, mean, stddev, slope, intercept):
+    def _gaussian_plus_linear(self, x, amplitude, mean, stddev, slope, intercept):
+        """高斯函数加线性背景"""
         return amplitude * np.exp(-((x - mean)**2 / (2 * stddev**2))) + slope * x + intercept
 
-    def value_to_index(self, value):
-        # return the index of the closest value in the xdata
+    def _value_to_index(self, value):
+        """找到最接近value的索引位置"""
         return np.abs(self.xdata - value).argmin()
+
+    def _fit_gaussian(self, peak, spectrum, x_index):
+        """对单个峰进行高斯拟合"""
+        # 定义拟合范围
+        fit_range = float(0.5 * np.sqrt(abs(peak))) * np.sqrt(self.xdata[-1] - self.xdata[0]) * 0.1
+        if self.data_width is None:
+            self._getFilterSigma()  # 确保data_width已计算
+        fit_range = max(fit_range, self.data_width * 0.01)  # 最小取数据宽度的1%
         
-    def fit_peak(self, fit_range, p0=[1,0,1,0,0]):
-        '''
-        适用gaussian_plus_linear拟合峰，
-        手动指定拟合范围fit_range，和给出拟合初值p0
-        画图并在图中给出拟合结果
-        p0 = [amplitude, mean, stddev, slope, intercept]
-        '''
-        left = self.value_to_index(fit_range[0])
-        right = self.value_to_index(fit_range[1])
+        start = max(self.xdata[0], peak - fit_range)
+        end = min(self.xdata[-1], peak + fit_range)
+        
+        start_index = self._value_to_index(start)
+        end_index = max(self._value_to_index(end), start_index+1)
+        peak_index = self._value_to_index(peak)
+        
+        # 设置拟合边界和初值
+        lb = [0, 0.5*start, -np.inf, -np.inf, -np.inf]
+        ub = [1.5*max(self.ydata), 2*end, np.inf, np.inf, np.inf]
+        x0 = [spectrum[peak_index], peak, 1/2*fit_range, 0, 0]
+        
+        # 第一次拟合
+        try:
+            popt1, pcov1 = curve_fit(self._gaussian_plus_linear, self.xdata[start_index:end_index], 
+                                     spectrum[start_index:end_index], p0=x0, bounds=(lb, ub), maxfev=5000)
+        except RuntimeError:
+            print(f"峰位 {peak} 第一次拟合失败")
+            return None
+
+        # 计算第一次拟合的chi2/ndof
+        expected_value1 = self._gaussian_plus_linear(self.xdata[start_index:end_index], *popt1)
+        residuals1 = spectrum[start_index:end_index] - expected_value1
+        chi2_1 = np.sum(residuals1**2 / expected_value1)
+        ndof1 = len(residuals1) - len(popt1)
+        perr1 = np.sqrt(np.diag(pcov1))
+
+        # 保存第一次拟合的范围
+        start_index1 = start_index
+        end_index1 = end_index
+
+        # 根据第一次拟合结果调整拟合范围，进行第二次拟合
+        peak = popt1[1]
+        fit_range = min(abs(7 * popt1[2]), 1.5*fit_range)
+        
+        start = max(self.xdata[0], popt1[1] - 0.9*fit_range)
+        end = min(self.xdata[-1], popt1[1] + 1.1*fit_range)
+        start_index = self._value_to_index(start)
+        end_index = self._value_to_index(end)
+        
+        # 第二次拟合
+        try:
+            popt2, pcov2 = curve_fit(self._gaussian_plus_linear, self.xdata[start_index:end_index], 
+                                     spectrum[start_index:end_index], 
+                                     p0=[spectrum[peak_index], peak, 1/2*fit_range, 0, 0], 
+                                     bounds=(lb, ub), maxfev=5000)
+        except (RuntimeError, ValueError):
+            print(f"峰位 {peak} 第二次拟合失败，使用第一次拟合结果")
+            return popt1, perr1, chi2_1, ndof1, start_index1, end_index1
+
+        # 计算第二次拟合的chi2/ndof
+        expected_value2 = self._gaussian_plus_linear(self.xdata[start_index:end_index], *popt2)
+        residuals2 = spectrum[start_index:end_index] - expected_value2
+        chi2_2 = np.sum(residuals2**2 / expected_value2)
+        ndof2 = len(residuals2) - len(popt2)
+        perr2 = np.sqrt(np.diag(pcov2))
+
+        # 比较两次拟合结果，返回较好的一次
+        if np.sum(perr1) < np.sum(perr2):
+            return popt1, perr1, chi2_1, ndof1, start_index1, end_index1
+        else:
+            return popt2, perr2, chi2_2, ndof2, start_index, end_index
+
+    def _find_all_peaks(self, spectrum, x_index):
+        """寻找并拟合所有峰"""
+        # 获取滤波参数
+        sigma = self._getFilterSigma()
+        
+        # 应用高斯滤波平滑谱
+        spectrum_smooth = gaussian_filter1d(spectrum, sigma=sigma)
+        
+        # 在平滑后的谱中寻找峰
+        peaks_index, _ = find_peaks(spectrum_smooth, distance=10, width=3, height=10, prominence=2)
+        peaks_lists = self.xdata[peaks_index]
+        self.peaks_index = peaks_index
+        
+        print(f"找到 {len(peaks_lists)} 个峰")
+        
+        # 拟合结果列表 (popt, perr, chi2, ndof, start, end)
+        fit_results = []
+        
+        # 对每个峰进行拟合
+        for peak in peaks_lists:
+            # 拟合峰
+            result = self._fit_gaussian(peak, spectrum, x_index)
+            
+            # 如果拟合失败，跳过
+            if result is None:
+                print(f"峰 {peak} 拟合失败，跳过")
+                continue
+                
+            popt, perr, chi2, ndof, start_index, end_index = result
+            chi2_by_ndof = chi2/ndof
+            
+            # 如果峰数量较多，根据条件筛选
+            if len(peaks_lists) > 3:
+                print(f"发现 {len(peaks_lists)} 个峰，数量较多。谱可能存在噪声，请检查拟合结果。")
+                
+                # 根据拟合优度筛选
+                if chi2_by_ndof > 20 or chi2_by_ndof < 0.5:
+                    print(f"由于chi2/ndof = {chi2_by_ndof:.2f}不符合要求，移除峰 {peak}")
+                    continue
+                
+                # 根据能量分辨率筛选
+                if (popt[2]**2 / popt[1]) > 0.5:
+                    print(f"由于sigma^2/mean = {popt[2]**2 / popt[1]:.2f}过大，移除峰 {peak}")
+                    continue
+            
+            fit_results.append((popt, perr, chi2, ndof, start_index, end_index))
+            
+        return fit_results
+
+    def _plot_spectrum_with_peaks(self, spectrum, x_index, fit_results, save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), show_annotations=True, **kwargs):
+        """Plot spectrum with peak fitting results
+        
+        Parameters:
+        -----------
+        show_annotations : bool, optional
+            Whether to display peak annotations (arrows and stars)
+        **kwargs : 
+            Additional keyword arguments to pass to plt functions
+        """
+        # Create figure with style
+        fig = setup_figure(figsize=figsize, style=style)
+        
+        # Plot spectrum (without label)
+        if self.isSpectrum:
+            plt.hist(self.xdata, weights=spectrum, bins=len(self.xdata), histtype='step', **kwargs)
+        else:
+            plt.plot(self.xdata, spectrum, **kwargs)
+        
+        # Plot each fit result (使用纯实线，不添加额外标记)
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        for i, result in enumerate(fit_results):
+            popt, perr, chi2, ndof, start, end = result
+            fit_label = format_fit_label(popt[1], perr[1], popt[2], perr[2], chi2, ndof)
+            color = colors[(i + 1) % len(colors)]  # 使用不同于数据的颜色
+            plt.plot(self.xdata[start:end], self._gaussian_plus_linear(self.xdata[start:end], *popt), 
+                    '-', color=color, linewidth=1, label=fit_label)
+            
+            # Store the fitted peak for future reference
+            self.fitted_peaks[popt[1]] = (popt, perr)
+            
+            # 直接标注每个拟合峰
+            if show_annotations:
+                peak_index = np.abs(self.xdata - popt[1]).argmin()
+                peak_x = popt[1]  # 使用拟合得到的峰值
+                peak_y = spectrum[peak_index]
+                
+                # 创建箭头注释
+                arrow_y = min(peak_y + 0.1*plt.gca().get_ylim()[1], 0.9*plt.gca().get_ylim()[1])
+                plt.annotate(f'{peak_x:.2f}', 
+                            xy=(peak_x, peak_y), 
+                            xycoords='data', 
+                            xytext=(peak_x + 0.02 * (plt.gca().get_xlim()[1] - plt.gca().get_xlim()[0]), arrow_y), 
+                            textcoords='data',
+                            arrowprops=dict(arrowstyle="->", connectionstyle="arc3", clip_on=True),
+                            fontsize=fontsize_annotate)
+                
+                # 绘制标记
+                plt.plot(peak_x, peak_y, "*", color='red')
+        
+        # Create legend with custom formatting
+        configure_legend()
+        
+        # Set axes labels and title
+        set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=title)
+        
+        # Set log scale
+        if logPlot:
+            if logPlot == 'logY':
+                plt.yscale('log')
+            elif logPlot == 'logX':
+                plt.xscale('log')
+            elif logPlot == 'logXY':
+                plt.yscale('log')
+                plt.xscale('log')
+        
+        # 返回当前图形和坐标轴，允许用户进一步自定义
+        ax = plt.gca()
+        
+        # Finalize and show/save
+        if save_path:
+            finalize_figure(tight=True, save_path=save_path)
+            return None, None
+        return fig, ax
+
+    def fit_peak(self, fit_range, p0=[1,0,1,0,0], title=None, style=None, figsize=(5, 4), save_path=None, **kwargs):
+        """
+        Fit peak using gaussian_plus_linear
+        
+        Parameters:
+        fit_range (list): x-axis range for fitting [min, max]
+        p0 (list): Initial parameters [amplitude, mean, stddev, slope, intercept]
+        title (str, optional): Custom title for the plot
+        style (list or str, optional): Matplotlib style to use
+        figsize (tuple, optional): Figure size in inches (width, height)
+        save_path (str, optional): Path to save the plot, if None or empty the plot will be displayed
+        **kwargs: Additional keyword arguments to pass to plt functions
+        
+        Returns:
+        tuple: (popt, perr) Fit parameters and errors
+        """
+        left = self._value_to_index(fit_range[0])
+        right = self._value_to_index(fit_range[1])
 
         if right - left < 1:
-            raise ValueError("Fit range is too small. Please select a larger range.")
+            raise ValueError("Fit range too small, please select a larger range.")
 
+        # Set initial parameters
         amp, mean, stddev, slope, intercept = p0
         if amp == 1:
-            amp = 0.6*max(self.ydata[left:right])
+            amp = 0.6 * max(self.ydata[left:right])
         if mean == 0:
-            mean = self.xdata[np.argmax(self.ydata[left:right])] + self.xdata[left]
-            # print("left = ", left, "right = ", right, "mean = ", mean, "xdata = ", self.xdata[left:right])
-            # mean = (self.xdata[left] + self.xdata[right]) / 2
-            
+            mean = self.xdata[left + np.argmax(self.ydata[left:right])]
         if stddev == 1:
             stddev = (right - left) * 0.1
 
         p0 = [amp, mean, stddev, slope, intercept]
 
         try:
-            popt, pcov = curve_fit(self.gaussian_plus_linear, self.xdata[left:right], self.ydata[left:right], p0=p0)
+            # Perform fit
+            popt, pcov = curve_fit(self._gaussian_plus_linear, self.xdata[left:right], self.ydata[left:right], p0=p0)
             perr = np.sqrt(np.diag(pcov))
 
-            # Calculate chi2
-            residuals = self.ydata[left:right] - self.gaussian_plus_linear(self.xdata[left:right], *popt)
-            chi2 = np.sum((residuals ** 2) / self.gaussian_plus_linear(self.xdata[left:right], *popt))
+            # Calculate goodness of fit
+            residuals = self.ydata[left:right] - self._gaussian_plus_linear(self.xdata[left:right], *popt)
+            chi2 = np.sum((residuals ** 2) / self._gaussian_plus_linear(self.xdata[left:right], *popt))
             Ndof = len(self.xdata[left:right]) - len(popt)
 
-            title = os.path.basename(self.data_dir) + f" peak at {popt[1]:.2f}±{popt[2]:.2f}"
-            fit_label = f'Gauss Fit: peak at {popt[1]:.2f}±{popt[2]:.2f}'
+            # Store fitted peak
+            self.fitted_peaks[popt[1]] = (popt, perr)
+            
+            # Create fit label and title
+            fit_label = format_fit_label(popt[1], perr[1], popt[2], perr[2], chi2, Ndof)
+            plot_title = title if title is not None else f"Peak at {popt[1]:.2f}$\\pm${perr[1]:.2f}"
         except RuntimeError:
-            title = os.path.basename(self.data_dir) + " Fit Failed"
-            fit_label = "Fit Failed"
+            plot_title = title if title is not None else "Fit failed"
+            fit_label = "Fit failed"
 
-        with plt.style.context(['science', 'ieee','std-colors','grid','no-latex']):
-            plt.rcParams['font.family'] = 'Segoe UI'
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.xdata, self.ydata, label='Measured Spectrum')
-            if 'popt' in locals():
-                plt.plot(self.xdata[left:right], self.gaussian_plus_linear(self.xdata[left:right], *popt), label=fit_label)
-            else:
-                plt.plot(self.xdata[left:right], self.ydata[left:right], 'r', label='Fit Range')
-            plt.legend(fontsize=12)
-            plt.title(title,fontsize=20)
-            plt.xlabel(self.unitX,fontsize=16)
-            plt.ylabel(self.unitY,fontsize=16)
-            plt.xticks(fontsize=14)
-            plt.yticks(fontsize=14)
-
-            # Add fit results to the plot
+        # Create figure with style
+        fig = setup_figure(figsize=figsize, style=style)
+        
+        # Plot data
+        if self.isSpectrum:
+            plt.hist(self.xdata, weights=self.ydata, bins=len(self.xdata), histtype='step', **kwargs)
+        else:
+            plt.plot(self.xdata, self.ydata, **kwargs)
+        
+        # Plot fit
         if 'popt' in locals():
-            fit_function = f'Fit function:\nGaussian: $f(x) = {popt[0]:.2f} \cdot e^{{-0.5 \cdot ((x - {popt[1]:.2f}) / {popt[2]:.2f})^2}}$\nLinear: $f(x) = {popt[3]:.2f} \cdot x + {popt[4]:.2f}$'
-            plt.text(0.05, 0.95, fit_function + f'\nChi2: {chi2:.2f}\nNdof: {Ndof}', transform=plt.gca().transAxes, fontsize=12, verticalalignment='top')
+            plt.plot(self.xdata[left:right], self._gaussian_plus_linear(self.xdata[left:right], *popt), 
+                     '-', linewidth=2.5, label=fit_label)
+        else:
+            plt.plot(self.xdata[left:right], self.ydata[left:right], 'r', label='Fit range')
+        
+        # Configure legend and labels
+        configure_legend()
+        set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=plot_title)
 
-            plt.show()
+        # Finalize and show/save
+        finalize_figure(tight=True, save_path=save_path)
 
         if 'popt' in locals():
             return popt, perr
 
-
-    def _fit_gaussian(self, peak, spectrum, x_index):
-        # Define fitting range
-        fit_range = float(0.5 * np.sqrt(abs(peak)))*np.sqrt(self.xdata[-1] - self.xdata[0])*0.1 # 以峰值为中心，向两边取0.5倍的标准差
-        logging.debug(f"the raw fit range is {fit_range}")
-        fit_range = max(fit_range, self.data_width * 0.01) # 最小取10个点
-        logging.debug(f"the real fit range is {fit_range}")
-        start = max(self.xdata[0], peak - fit_range)
-        end = min(self.xdata[-1], peak + fit_range)
-        # record the peak and start, end
-        logging.debug(f"peak = {peak}, start = {start}, end = {end}")
-
-        start_index = self.value_to_index(start)
-        end_index = max(self.value_to_index(end), start_index+1)
-        peak_index = self.value_to_index(peak)
-
-        # Fit Gaussian function
-        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-            # 画出拟合范围，用透明度为0.3的红色色块
-            plt.axvspan(start, end, alpha=0.2, color='red')
+    def plot_with_fit(self, save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), filter_sigma=None, show_annotations=True, **kwargs):
+        """
+        Find and fit all peaks, generate plot
         
-        # bounds: [amplitude, mean, stddev, slope, intercept]
-        lb = [0,                       0.5*start,           -np.inf,        -np.inf,    -np.inf]
-        ub = [1.5*max(self.ydata),     2*end,               np.inf,         np.inf,     np.inf]
-        x0 = [spectrum[peak_index],    peak,                1/2*fit_range,  0,          0]
-        x0 = [round(x, 4) for x in x0]
-        lb = [round(x, 4) for x in lb]
-        ub = [round(x, 4) for x in ub]
-
-        logging.debug(f"The bounds of fit for peak at {self.xdata[peak_index]}: {lb}, {ub}")
-        logging.debug(f"Initial guess for peak at {self.xdata[peak_index]}: {x0}")
-        logging.debug(f"start = {start}, end = {end}, start_index = {start_index}, end_index = {end_index}")
-        logging.debug(f"self.xdata[start_index:end_index] = {self.xdata[start_index:end_index]}")
-        logging.debug(f"spectrum[start_index:end_index] = {spectrum[start_index:end_index]}")
+        Parameters:
+        save_path (str, optional): Path to save the plot
+        logPlot (str, optional): Log scale setting ('logY', 'logX', 'logXY', or False)
+        title (str, optional): Custom title for the plot
+        style (list or str, optional): Matplotlib style to use
+        figsize (tuple, optional): Figure size in inches (width, height)
+        filter_sigma (float, optional): Custom sigma value for peak detection filter
+        show_annotations (bool, optional): Whether to display peak annotations (arrows and stars)
+        **kwargs: Additional keyword arguments to pass to plt functions
         
-        # First fit
-        try:
-            popt1, pcov1 = curve_fit(self.gaussian_plus_linear, self.xdata[start_index:end_index], spectrum[start_index:end_index], 
-                                    p0=x0, bounds=(lb, ub), maxfev=5000)
-        except RuntimeError as e:
-            logging.error(f"Error in first curve fitting: {str(e)}")
-            return None
-
-        # Calculate chi2/ndof for the first fit
-        expected_value1 =  self.gaussian_plus_linear(self.xdata[start_index:end_index], *popt1)
-        residuals1 = spectrum[start_index:end_index] - expected_value1
-        chi2_1 = np.sum(residuals1**2 / expected_value1)
-        ndof1 = len(residuals1) - len(popt1)
-        chi2_by_ndof1 = chi2_1 / ndof1
-        perr1 = np.sqrt(np.diag(pcov1))
-        logging.debug(f"The first Fit results: popt={popt1}, chi2/ndof={chi2_1} / {ndof1} = {chi2_by_ndof1:.2f}")
-        logging.debug(f"Standard errors for peak at {self.xdata[peak_index]}: {perr1}")
-
-        # Save the indices for the first fit
-        start_index1 = start_index
-        end_index1 = end_index
-
-        # Reset the fit_range and fit again according to the sigma
-        peak = popt1[1]
-        if self.detector.type == "PMT":
-            fit_range = abs(5 * popt1[2])
-        else:
-            fit_range = min(abs(7 * popt1[2]), 1.5*fit_range) # 以峰值为中心，向两边总共取7倍的标准差
-        logging.debug(f"The detector type is {self.detector.type}, New fit range for peak at {self.xdata[peak_index]} = {fit_range}")
-        start = max(self.xdata[0], popt1[1] - 0.9*fit_range)
-        end = min(self.xdata[-1], popt1[1] + 1.1*fit_range)
-        start_index = self.value_to_index(start)
-        end_index = self.value_to_index(end)
-        peak_index = self.value_to_index(peak)
-
-        # Second fit
-        try:
-            popt2, pcov2 = curve_fit(self.gaussian_plus_linear, self.xdata[start_index:end_index], spectrum[start_index:end_index], 
-                                    p0=[spectrum[peak_index], self.xdata[peak_index], 1/2*fit_range, 0, 0], bounds = (lb, ub),maxfev=5000)
-        except (RuntimeError, ValueError)  as e:
-            perr2 = np.sqrt(np.diag(pcov1))
-            chi2_by_ndof2 = 0
-            logging.error(f"Error occurred during the more detailed curve fitting: {str(e)}")
-            return popt1, perr1, chi2_1, ndof1, start_index1, end_index1
-
-        # Calculate chi2/ndof for the second fit
-        expected_value2 =  self.gaussian_plus_linear(self.xdata[start_index:end_index], *popt2)
-        residuals2 = spectrum[start_index:end_index] - expected_value2
-        chi2_2 = np.sum(residuals2**2 / expected_value2)
-        ndof2 = len(residuals2) - len(popt2)
-        chi2_by_ndof2 = chi2_2 / ndof2
-        perr2 = np.sqrt(np.diag(pcov2))
-        logging.debug(f"The second Fit results: popt={popt2}, chi2/ndof={chi2_by_ndof2:.2f}")
-        logging.debug(f"Standard errors for peak at {self.xdata[peak_index]}: {perr2}")
-
-        # Compare the errors and return the best fit
-        if np.sum(perr1) < np.sum(perr2):
-            return popt1, perr1, chi2_1, ndof1, start_index1, end_index1
-        else:
-            return popt2, perr2, chi2_2, ndof2, start_index, end_index
-
-
-    def _find_matching_peaks(self, peaks_list = [], expected_ratios = [], fluctuation = 0.1):
-        '''
-        寻找匹配的峰
-        :param peaks_list: 峰的位置, 例如 [12.1, 30]
-        :param expected_ratios: 期望的峰值比例, 例如 [1274/511]
-        :param fluctuation: 允许的峰值比例的波动范围
-        :return: 匹配的峰的位置, 例如 [(12.1, 30)]
-        '''
-        matching_pairs = []
-        debug = logging.getLogger().getEffectiveLevel() == logging.DEBUG
-        for i in range(len(peaks_list)):
-            for j in range(i+1, len(peaks_list)):
-                ratio = peaks_list[j] / peaks_list[i]
-                for expected_ratio in expected_ratios:
-                    diff = abs(ratio - expected_ratio)
-                    limit = fluctuation * expected_ratio
-                    if debug:
-                        logging.debug(f"For peaks {peaks_list[i]} and {peaks_list[j]}: Their ratio is {ratio}, Expected ratio is {expected_ratio}, Difference is {diff}, Limit is {limit}")
-                    if np.all(diff <= limit):
-                        matching_pairs.append((peaks_list[i], peaks_list[j]))
-                        logging.info(f"Matching peaks found: {peaks_list[i]}, {peaks_list[j]}")
-                        break
-                else:
-                    continue
-                break
-        return matching_pairs
-
-
-    def _find_and_fit_peaks(self, spectrum, x_index, expected_ratios):
-        # Function name for logging
-        func_name = "find_and_fit_peaks: "
-        logging.debug(func_name + "Starting...")
-
-        # Get the sigma for the Gaussian filter
-        sigma = self.getFilterSigma()
-        # Apply the Gaussian filter to the spectrum
-        spectrum_smooth = gaussian_filter1d(spectrum, sigma=sigma)
-        # Find the peaks in the smoothed spectrum
-        peaks_index, _ =  find_peaks(spectrum_smooth, distance=20, width = 10, height = 18, prominence=2)  
-        
-        # Calculate the centroid of the image
-        centroid = np.average(self.xdata, weights=self.ydata)
-        # Only consider peaks to the right of the centroid
-        peaks_index = peaks_index[self.xdata[peaks_index] > centroid*0.3]
-        logging.debug(func_name + f"0.3 * centroid is {0.3 * centroid}, peaks_index is {peaks_index}")
-
-        # Get the x values of the peaks
-        peaks_lists = self.xdata[peaks_index]
-        self.peaks_index = peaks_index
-
-        # If the log level is set to DEBUG, save and plot the original and smoothed spectra
-        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.xdata, spectrum, label='Original')
-            plt.plot(self.xdata, spectrum_smooth, label='Smoothed')
-            plt.plot(peaks_lists, spectrum_smooth[peaks_index], "x")
-            plt.legend()
-            logging.debug(func_name + f'Found peaks at: {peaks_lists}')
-
-        # Find the matching peaks
-        matching_pairs =  self._find_matching_peaks(peaks_lists, expected_ratios, fluctuation=0.15)
-
-        # Initialize the results list
-        fit_results = []
-        logging.debug(func_name + f"Matching pairs: {matching_pairs}")
-
-        # If no matching pairs were found, log a message and return
-        if len(matching_pairs) == 0:
-            logging.info(func_name + f"Expected peaks not found in file {self.data_dir}")
-            return matching_pairs, fit_results
-
-        # Copy the matching pairs list
-        matching_pairs_copy = matching_pairs.copy()
-
-        # Initialize the list to store the results for this pair
-        peak_results = []
-        num = 0
-
-        # For each pair in the matching pairs
-        for pair in matching_pairs_copy:
-            # For each peak in the pair
-            for peak in pair:
-                num += 1
-
-                # Only consider the first few peaks, as there may be very small interference peaks in the high energy area
-                if num > 6:
-                    break
-
-                # Fit a Gaussian to the peak
-                result = self._fit_gaussian(peak, spectrum, x_index)
-
-                # If the result is None, skip this iteration
-                if result is None:
-                    logging.error("Error occurred during the more detailed curve fitting. Skipping this iteration.")
-                    continue
-
-                popt, perr, chi2, ndof, start_index, end_index = result
-                
-                # Add the results to the peak results list
-                peak_results.append((popt, perr, chi2, ndof, start_index, end_index, peak))
-
-        # Sort the results by peak position
-        peak_results.sort(key=lambda x: x[5])
-
-        # Get the first three results
-        first_three_results = peak_results[:3]
-
-        # Find the result with the smallest sigma
-        min_sigma_result = min(first_three_results, key=lambda x: abs(x[0][2]))
-        min_sigma_peak = min_sigma_result[5]
-
-        for pair in matching_pairs_copy:
-            logging.debug(func_name + f"Processing pair: {pair}")
-            pair_is_valid = True  # Assume the pair is valid until proven otherwise
-            pair_results = []  # Store the results for this pair
-
-            for peak in pair:
-                # Fit a Gaussian to the peak and get standard errors
-                result = self._fit_gaussian(peak, spectrum, x_index)
-
-                # If the result is None, skip this iteration
-                if result is None:
-                    logging.error("Error occurred during the more detailed curve fitting. Skipping this iteration.")
-                    continue
-                popt, perr, chi2, ndof, start_index, end_index = result
-
-                # Check if chi2/ndof > 2 or < 0.5 (according to goodness of fit)
-                chi2_by_ndof = chi2/ndof
-                if chi2_by_ndof > 20 or chi2_by_ndof < 0.5:
-                    pair_is_valid = False
-                    logging.info(func_name + f"Removed pair {pair} due chi2/ndof fit at peak {peak} is {chi2_by_ndof:.2f}, which means the fit is not good enough")
-                    break  # No need to check the other peaks in this pair
-
-                # Check if sigma^2/mean > 0.12 (according to energy resolution)
-                if (popt[2]**2 / popt[1]) > 0.5:
-                    pair_is_valid = False
-                    logging.info(func_name + f"Removed pair {pair} due to sigma^2/mean ratio at peak {peak} is {popt[2]**2 / popt[1]:.2f}, which means the energy resolution is too low")
-                    break  # No need to check the other peaks in this pair
-
-                # Check if the current peak's sigma is the smallest
-                # If the current peak is to the left of the peak with the smallest sigma, discard it
-                if peak < min_sigma_peak and abs(popt[2]) > peak_results[0][0][2]:
-                    pair_is_valid = False
-                    logging.debug(func_name + f"min_sigma_peak is {min_sigma_peak}, current peak is {peak}, sigma is {popt[2]}, smallest sigma is {peak_results[0][0][2]}")
-                    logging.info(func_name + f"Removed pair {pair} due to peak {peak} is to the left of the peak with the smallest sigma")
-                    break
-
-                # If the peak passed all checks, store its results
-                pair_results.append((popt, perr, chi2, ndof, start_index, end_index))
-
-            # If the pair is still valid after checking all peaks, save its results
-            if pair_is_valid:
-                fit_results.extend(pair_results)
-                for result in pair_results:
-                    popt, perr, chi2, ndof, start_index, end_index = result
-                    logging.debug(func_name + f"Accepted pair {pair} with peak at {popt[1]}, chi2/ndof = {chi2_by_ndof:.2f}, sigma^2/mean = {popt[2]**2 / popt[1]:.2f}")
-                    if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-                        plt.plot(self.xdata[start_index:end_index],  self.gaussian_plus_linear(self.xdata[start_index:end_index], *popt), label=f'Gauss Fit: peak at {popt[1]:.2f}±{popt[2]:.2f}')
-                        plt.annotate(f'peak = {popt[1]:.2f}±{popt[2]:.2f}', xy=(0.4, 0.9 - annotation_counter * 0.04), xycoords='axes fraction')
-                        annotation_counter += 1
-            else:
-                matching_pairs.remove(pair)
-
-        logging.debug(func_name + f"Matching pairs after filtering: {matching_pairs}")
-        logging.debug(func_name + f"Fit results: {fit_results}")
-        logging.debug(func_name + "Finished.\n\n")
-        # Add legend after the loop
-        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-            plt.legend()
-
-        return matching_pairs, fit_results
-
-    def _find_all_peaks(self, spectrum, x_index):
-        func_name = "find_all_peaks: "
-        logging.debug(func_name + "Starting...")
-
-        sigma = self.getFilterSigma()
-        logging.debug(func_name + f"Filter sigma: {sigma}")
-
-        spectrum_smooth = gaussian_filter1d(spectrum, sigma=sigma)
-        peaks_index, _ =  find_peaks(spectrum_smooth, distance=10, width = 3, height = 10, prominence=2)  
-
-        peaks_lists = self.xdata[peaks_index]
-        self.peaks_index = peaks_index
-
-        # 如果日志级别设置为DEBUG，则保存和绘制滤波前后的光谱
-        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.xdata, spectrum, label='Original')
-            plt.plot(self.xdata, spectrum_smooth, label='Smoothed')
-            plt.plot(peaks_lists, spectrum_smooth[peaks_index], "x")
-            plt.legend()
-            logging.debug(func_name + f'Found peaks at: {peaks_lists}')
-            logging.debug(func_name + "-"*50)  # Add a separator line
-
-        fit_results = [] # (popt, perr, chi2, ndof, start, end)
-        annotation_counter = 0
-        for peak in peaks_lists:
-            logging.debug(f"\n")
-            logging.debug(func_name + f"Processing peak: {peak}")
-            # record the brief information about peak, spectrum, x_index
-            logging.debug(func_name + f"peak: {peak}, spectrum: {spectrum[:5]}..., x_index: {x_index[:5]}...")
-            result = self._fit_gaussian(peak, spectrum, x_index)
-            # If the result is None, skip this iteration
-            if result is None:
-                logging.error("Error occurred during the more detailed curve fitting. Skipping this iteration.")
-                continue
-            popt, perr, chi2, ndof, start_index, end_index = result
+        Returns:
+        tuple: (fig, ax) matplotlib figure and axes objects if save_path is None
+        """
+        if filter_sigma is not None:
+            self.sigma = filter_sigma
             
-            chi2_by_ndof = chi2/ndof
-            logging.debug(func_name + f"Fit results: popt={popt}, perr={perr}, chi2_by_ndof={chi2}/{ndof}={chi2_by_ndof}, start_index={start_index}, end_index={end_index}")
-
-            if len(peaks_lists) > 3:
-                logging.info(func_name + f"There are {len(peaks_lists)} peaks in the spectrum, which is too many. The spectrum may be noisy. Please check the spectrum and the fit results.")
-                # 只有峰的数量太多时，才根据下面的规则删除。
-                # 应当改成设置某个判据，以下面这些参数和峰的数量作为标准来判断是否要删除
-                if chi2_by_ndof > 20 or chi2_by_ndof < 0.5:
-                    logging.info(func_name + f"!!! Removed peak {peak} due chi2/ndof fit at peak {peak} is {chi2}/{ndof}={chi2_by_ndof:.2f}, which means the fit is not good enough")
-                    continue
-                if (popt[2]**2 / popt[1]) > 0.5:
-                    logging.info(func_name + f"!!! Removed peak {peak} due to sigma^2/mean ratio at peak {peak} is {popt[2]**2 / popt[1]:.2f}, which means the energy resolution is too low")
-                    continue
-            fit_results.append((popt, perr, chi2, ndof, start_index, end_index))
-            logging.debug(func_name + f"Accepted peak {peak} with peak at {popt[1]}, chi2/ndof = {chi2}/{ndof}={chi2_by_ndof:.2f}, sigma^2/mean = {popt[2]**2 / popt[1]:.2f}")
-            if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-                plt.plot(self.xdata[start_index:end_index],  self.gaussian_plus_linear(self.xdata[start_index:end_index], *popt), label=f'Gauss Fit: peak at {popt[1]:.2f}±{popt[2]:.2f}')
-                plt.annotate(f'peak = {popt[1]:.2f}±{popt[2]:.2f}', xy=(0.4, 0.9 - annotation_counter * 0.04), xycoords='axes fraction')
-                annotation_counter += 1
-            logging.debug(func_name + "-"*50)  # Add a separator line
-
-        logging.debug(func_name + f"Final fit results: {fit_results}")
-        # Add legend after the loop
-        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
-            plt.legend()
-
-        logging.debug(func_name + "Finished.\n\n")
-        return fit_results
-
-
-    def _plot_spectrum_with_peaks(self, spectrum, x_index, fit_results, save_path=None, fontsize = 16, logPlot = False):
-        with plt.style.context(['science', 'ieee','std-colors','grid','no-latex']):
-            plt.rcParams['font.family'] = 'Segoe UI'
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.xdata, spectrum, label='Measured Spectrum')
-            for result in fit_results:
-                popt, perr, chi2, ndof, start, end = result  # get standard errors
-                # Use gaussian_plus_linear function instead of gaussian
-                plt.plot(self.xdata[start:end],  self.gaussian_plus_linear(self.xdata[start:end], *popt), label=f'μ={popt[1]:.2f}±{perr[1]:.2f}, σ={popt[2]:.2f}±{perr[2]:.2f}, res={2.355*popt[2] / popt[1]:.2f}, χ2/ndof={chi2:.2f}/{ndof}')  # use standard error for error bar
-            plt.legend(fontsize=fontsize-4)
-            # titelString = 'Energy Spectrum with Gaussian Fits'
-            titelString = os.path.basename(self.data_dir) + ' Gaussian Fits'
-            if save_path:
-                titelString = os.path.basename(save_path)
-            plt.title(titelString,fontsize=fontsize+4)
-            # 画出所有的peaks值，并在旁边标上坐标
-            for peak_index in self.peaks_index:
-                arrow_y = min(spectrum[peak_index]+0.1*plt.gca().get_ylim()[1], 0.9*plt.gca().get_ylim()[1])
-                plt.annotate(f'{self.xdata[peak_index]:.2f}', 
-                            xy=(self.xdata[peak_index], spectrum[peak_index]), 
-                            xycoords='data', 
-                            xytext=(self.xdata[peak_index] + 0.02 * (plt.gca().get_xlim()[1] - plt.gca().get_xlim()[0]), arrow_y ), 
-                            textcoords='data',
-                            arrowprops=dict(arrowstyle="->", connectionstyle="arc3", clip_on=True))
-                plt.plot(self.xdata[peak_index], self.ydata[peak_index], "*", color = 'red')
-            plt.xlabel(self.unitX,fontsize=fontsize+4)
-            plt.ylabel(self.unitY,fontsize=fontsize+4)
-            plt.xticks(fontsize=fontsize)
-            plt.yticks(fontsize=fontsize)
-            if logPlot != False:
-                if logPlot == 'logY':
-                    plt.yscale('log')
-                elif logPlot == 'logX':
-                    plt.xscale('log')
-                elif logPlot == 'logXY':
-                    plt.yscale('log')
-                    plt.xscale('log')
-            if save_path:
-                plt.savefig(save_path, dpi = 300)
-            else:
-                plt.show()
-            if logging.getLogger().getEffectiveLevel() != logging.DEBUG:
-                plt.close()
-
-    def _plot_spectrum(self, spectrum, x_index, save_path=None, fontsize = 16, logPlot=False):
-        with plt.style.context(['science', 'ieee','std-colors','grid','no-latex']):
-            plt.rcParams['font.family'] = 'Segoe UI'
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.xdata, spectrum, label='Measured Spectrum')
-            plt.legend(fontsize=fontsize-4)
-            if save_path:
-                titelString = os.path.basename(save_path)
-            else:
-                titelString = os.path.basename(self.data_dir)
-            plt.title(titelString,fontsize=fontsize+4)
-            plt.xlabel(self.unitX,fontsize=fontsize+4)
-            plt.ylabel(self.unitY,fontsize=fontsize+4)
-            plt.xticks(fontsize=fontsize)
-            plt.yticks(fontsize=fontsize)
-            if logPlot != False:
-                if logPlot == 'logY':
-                    plt.yscale('log')
-                elif logPlot == 'logX':
-                    plt.xscale('log')
-                elif logPlot == 'logXY':
-                    plt.yscale('log')
-                    plt.xscale('log')
-            if save_path:
-                plt.savefig(save_path, dpi = 300)
-            else:
-                plt.show()
-            if logging.getLogger().getEffectiveLevel() != logging.DEBUG:
-                plt.close()
-
-    def analysis_twopeaks_save(self, png_path=None):
-        '''
-        保存所有波形、能谱。如果是能谱，会尝试使用511/1274的关系拟合找到峰位
-        '''
-        spectrum = self.ydata
-        x_index = np.arange(len(spectrum))
-        # 期望的峰值比例，这里以511峰为基准
-        expected_ratios = [1274/511]
-        # 寻峰并拟合
-        matching_pairs, fit_results = self._find_and_fit_peaks(spectrum, x_index, expected_ratios)
-        logging.debug(f"matching_pairs: {matching_pairs}")
-        
-        # 如果发现的pair == 1，保存图片，并做好记录
-        if len(matching_pairs) == 1:
-            logging.info(f"All expected peaks found in file {self.data_dir}")
-            self._plot_spectrum_with_peaks(spectrum, x_index, fit_results, png_path)
-        # 如果发现的峰数量不匹配，复制文件到新的文件夹内，并保存图片到这个文件夹，便于后续人工处理
-        else:
-            try:
-                # Split the file name and extension
-                file_name, file_extension = os.path.splitext(png_path)
-                # If the file extension is .png, add WARNING before the extension
-                if file_extension == '.png':
-                    png_path = f"{file_name}_WARNING{file_extension}"
-            except TypeError:
-                # If png_path is None, do nothing
-                pass
-            logging.info(f"Expected peaks not found in file {self.data_dir}")
-            self._plot_spectrum_with_peaks(spectrum, x_index, fit_results, png_path)
-
-    def allpeaks_save(self, png_path=None, logPlot = False):
-        '''
-        保存所有波形、能谱。如果是能谱也保存所有拟合的峰信息
-        logPlot = 'logY' or 'logX' or 'logXY'
-        '''
         spectrum = self.ydata
         x_index = np.arange(len(spectrum))
         fit_results = self._find_all_peaks(spectrum, x_index)    
-        self._plot_spectrum_with_peaks(spectrum, x_index, fit_results, png_path, logPlot = logPlot)
+        return self._plot_spectrum_with_peaks(spectrum, x_index, fit_results, save_path, logPlot=logPlot, 
+                                      title=title, style=style, figsize=figsize, 
+                                      show_annotations=show_annotations, **kwargs)
 
-    def wave_save(self, png_path = None, logPlot = False):
-        '''
-        保存且仅保存所有波形图
-        logPlot = 'logY' or 'logX' or 'logXY' 
-        '''
+    def plot(self, save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), **kwargs):
+        """
+        Plot waveform or spectrum without peak fitting
+        
+        Parameters:
+        save_path (str, optional): Path to save the plot
+        logPlot (str, optional): Log scale setting ('logY', 'logX', 'logXY', or False)
+        title (str, optional): Custom title for the plot
+        style (list or str, optional): Matplotlib style to use
+        figsize (tuple, optional): Figure size in inches (width, height)
+        **kwargs: Additional keyword arguments to pass to plt functions
+        
+        Returns:
+        tuple: (fig, ax) matplotlib figure and axes objects if save_path is None
+        """
         spectrum = self.ydata
         x_index = np.arange(len(spectrum))
-        self._plot_spectrum(spectrum, x_index, png_path, logPlot = logPlot)
-
+        
+        # Create figure with style
+        fig = setup_figure(figsize=figsize, style=style)
+        
+        # Plot based on data type
+        if self.isSpectrum:
+            plt.hist(self.xdata, weights=spectrum, bins=len(self.xdata), histtype='step', **kwargs)
+        else:
+            plt.plot(self.xdata, spectrum, **kwargs)
+            
+        # Set axes labels and title
+        set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=title)
+        
+        # Set log scale
+        if logPlot:
+            if logPlot == 'logY':
+                plt.yscale('log')
+            elif logPlot == 'logX':
+                plt.xscale('log')
+            elif logPlot == 'logXY':
+                plt.yscale('log')
+                plt.xscale('log')
+        
+        # 返回当前图形和坐标轴，允许用户进一步自定义
+        ax = plt.gca()
+        ax.minorticks_on()
+        # Finalize and show/save
+        if save_path:
+            finalize_figure(tight=True, save_path=save_path)
+            return None, None
+        return fig, ax
 
 
 if __name__ == "__main__":
-
-    # 设置日志文件
-    # 清除所有现有的处理器
-    # logging.getLogger().handlers = []
-    # # 创建一个处理器，将日志消息输出到标准输出
-    # # handler = logging.StreamHandler()
-    # handler = logging.FileHandler('log.txt')
-    # # 将处理器添加到根日志记录器
-    # logging.getLogger().addHandler(handler)
-    # # 设置日志级别为DEBUG
-    # logging.getLogger().setLevel(logging.DEBUG)
-
-
-    # detector = Detector(name = "R6233", type = "PMT")
-    # fileName = r'data\MGTest\R2083waves\C3---10dB+TVS+R2083@2500V+LYSO225+Na22--00007.txt'
-    # data1 = SpectrumAnalyzer(fileName, detector=detector)
-    # # data1.analysis_twopeaks_save('test.png')
-    # data1.wave_save('test.png') # 与右边基本等价 LeCroyDATA(fileName, isSpectrum=False).draw_figure(save_path = 'test2.png')
-    # # data1.allpeaks_save('test.png')
-
-    # data2 = LeCroyDATA(fileName, isSpectrum=False)
-    # data2.draw_figure(save_path = 'test2.png')
-
-    SiPIN_Am241 = SpectrumAnalyzer(r'240408+SiPIN\241Am+SiPIN--00000.csv')
-
-    SiPIN_Am241.fit_peak(fit_range=[2000, 2500])
+    # 获取当前脚本所在目录
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    test_file = os.path.join(current_dir, 'spectrum_test.txt')
+    
+    # 创建测试图像保存目录
+    test_dir = os.path.join(current_dir, 'testFigure')
+    os.makedirs(test_dir, exist_ok=True)
+    
+    # 示例 1: 使用 plt 函数自定义绘图样式
+    print("\n示例 1: 自定义绘图样式")
+    analyzer = SpectrumAnalyzer(test_file)
+    
+    # 使用 plot 并自定义 plt 样式
+    fig, ax = analyzer.plot(figsize=(8, 5))
+    plt.xlabel('Custom X Label')
+    plt.ylabel('Custom Y Label')
+    plt.title('Custom Plot Title')
+    plt.savefig(os.path.join(test_dir, 'example1_custom_style.png'), dpi=300)
+    plt.close()
+    
+    # 使用 plot_with_fit 并自定义 plt 样式
+    fig, ax = analyzer.plot_with_fit(filter_sigma=10, show_annotations=True)
+    plt.xlabel('Energy Scale')
+    plt.ylabel('Intensity (counts)')
+    plt.title('Spectrum Analysis with Custom Labels')
+    plt.savefig(os.path.join(test_dir, 'example1_custom_fit.png'), dpi=300)
+    plt.close()
+    
+    # 示例 2: 使用 kwargs 直接传递样式参数
+    print("\n示例 2: 使用参数设置样式")
+    analyzer = SpectrumAnalyzer(test_file)
+    
+    # 传递 color, linestyle 等参数
+    analyzer.plot(
+        save_path=os.path.join(test_dir, 'example2_kwargs.png'),
+        color='blue',
+        linewidth=2,
+        alpha=0.7,
+        title='Styled with kwargs'
+    )
+    
+    # 拟合时传递样式参数
+    analyzer.plot_with_fit(
+        save_path=os.path.join(test_dir, 'example2_fit_kwargs.png'),
+        filter_sigma=5,
+        title='Fit with Style Parameters',
+        color='green',
+        alpha=0.8
+    )
+    
+    # 示例 3: 访问原始数据和处理后数据
+    print("\n示例 3: 处理数据示例")
+    data = LeCroyDATA(test_file)
+    
+    # 获取原始数据
+    raw_x, raw_y, _, _ = data.get_data(processed=False)
+    print(f"原始数据形状: {raw_x.shape}")
+    
+    # 获取处理后的数据（默认处理）
+    proc_x, proc_y, unit_x, unit_y = data.get_data(processed=True)
+    print(f"处理后数据形状: {proc_x.shape}")
+    print(f"单位: {unit_x}, {unit_y}")
+    
+    # 应用不同的处理并获取数据
+    data.process_data(isregularize='MaxY', rebin_factor=20)
+    norm_x, norm_y, _, _ = data.get_data(processed=True)
+    print(f"归一化数据: min={norm_y.min():.2f}, max={norm_y.max():.2f}")
+    
+    # 测试1：基本数据读取和显示
+    print("\n测试1：基本显示功能")
+    data = LeCroyDATA(test_file)
+    print(f"设备: {data.device}")
+    print(f"数据类型: {data.data_type}")
+    print(f"采集时间: {data.acquisition_time}")
+    print(f"是否为能谱: {data.isSpectrum}")
+    
+    fig, ax = data.plot()
+    plt.savefig(os.path.join(test_dir, 'basic_plot.png'))
+    plt.close()
+    
+    # 测试2：能谱分析
+    print("\n测试2：能谱分析功能")
+    for sigma in [None, 10]:
+        analyzer = SpectrumAnalyzer(test_file, sigma=sigma)
+        analyzer.plot_with_fit(save_path=os.path.join(test_dir, f'spectrum_analysis_sigma{sigma}.png'))
+    
+    # 测试3：自定义bin数量
+    print("\n测试3：自定义bin功能")
+    for bins in [50, 200]:
+        data = LeCroyDATA(test_file)
+        data.set_bins(bins)
+        data.plot(save_path=os.path.join(test_dir, f'custom_bins_{bins}.png'))
+    
+    # 测试4：单峰拟合
+    print("\n测试4：单峰拟合功能")
+    analyzer = SpectrumAnalyzer(test_file)
+    fit_ranges = [[100, 150], [200, 250]]
+    for i, fit_range in enumerate(fit_ranges):
+        analyzer.fit_peak(fit_range=fit_range, save_path=os.path.join(test_dir, f'fit_peak_{i}.png'))
+    
+    # 测试5：对数坐标显示
+    print("\n测试5：对数显示功能")
+    data = LeCroyDATA(test_file)
+    for log_scale in ['logY', 'logXY']:
+        data.plot(save_path=os.path.join(test_dir, f'log_scale_{log_scale}.png'), logPlot=log_scale)
