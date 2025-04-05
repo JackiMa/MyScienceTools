@@ -1,3 +1,6 @@
+# version 1.2 2024年10月21日
+# 增加了InterpolationFunction类的__mul__和__rmul__方法，使得插值函数可以直接乘以一个数值
+
 # version 1.1 2024年6月14日
 # 修改了读取数据的方法，和之前不再兼容。增加自动识别的模块
 # 修改了测试代码，使之更清晰
@@ -13,16 +16,43 @@ import matplotlib.pyplot as plt
 import os
 
 class InterpolationFunction:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, x, y, *args, **kwargs):
         # Remove 'name' from kwargs if present and save it, otherwise default to None
         self.name = kwargs.pop('name', None)
+        # Save x and y for later use
+        self.x = x
+        self.y = y
         # Now, args and kwargs do not contain 'name', so they can be safely passed to interp1d
-        self.func = interp1d(*args, **kwargs)
+        self.func = interp1d(x, y, *args, **kwargs)
         # Copy all attributes from the interp1d object to this object
         self.__dict__.update(self.func.__dict__)
 
     def __call__(self, x):
         return self.func(x)
+
+    def _apply_operation(self, other, operation):
+        if isinstance(other, (float, int)):
+            new_y = operation(self.y, other)
+        elif isinstance(other, InterpolationFunction):
+            new_y = operation(self.y, other.y)
+        else:
+            raise TypeError(f"Unsupported operand type(s) for operation: 'InterpolationFunction' and '{type(other).__name__}'")
+
+        new_kwargs = {k: v for k, v in self.__dict__.items() if k in ['kind', 'axis', 'copy', 'bounds_error', 'fill_value', 'assume_sorted']}
+        new_func = InterpolationFunction(self.x, new_y, **new_kwargs)
+        return new_func
+
+    def __mul__(self, other):
+        return self._apply_operation(other, lambda x, y: x * y)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __add__(self, other):
+        return self._apply_operation(other, lambda x, y: x + y)
+
+    def __sub__(self, other):
+        return self._apply_operation(other, lambda x, y: x - y)
 
 class ReadData:
     def __init__(self, fileName, skiprows=None, sep = None):
@@ -106,7 +136,7 @@ class ReadData:
         return self.name
 
 class myInterpolation:
-    def __init__(self, data ,smooth_window=5, plot=False, isregularize='none'):
+    def __init__(self, source_data, smooth_window=5, plot=False, isregularize='none'):
         """
         初始化参数
 
@@ -118,15 +148,15 @@ class myInterpolation:
             plot (bool, optional): 是否绘制图像. Defaults to False.
             isregularize (str, optional): 数据规范化的方法，可选值为'MaxY', 'Area', 'MinMax', 'Z-Score', 'TotalY', 'none'. Defaults to 'none'.
         """
-        self.fileName = data.get_name()
-        self.data = data.get_data()
+        self.source_data = source_data
+        self.fileName = source_data.get_name()
+        self.data = source_data.get_data()
         self.smooth_window = smooth_window
         self.plot = plot
         self.isregularize = isregularize
 
         baseName = os.path.basename(self.fileName)
         self.name, _ = os.path.splitext(baseName)
-
 
         # 自动执行一些操作
         # If the last column is empty, drop it
@@ -140,7 +170,6 @@ class myInterpolation:
             self.scidata_process()
         self.smooth_data()
         self.do_interpolat()
-
 
     def scidata_process(self):
         self.x = self.data[0].values
@@ -187,16 +216,14 @@ class myInterpolation:
         return self.interpolation
 
     def plot_data(self):
-        # 如果需要，绘制原始数据和插值曲线
-        if self.plot:
-            plt.figure(figsize=(10, 6))
-            plt.title('Interpolation of data: ' + self.fileName)
-            plt.plot(self.rawdata[0], self.rawdata[1], 'o', label='Original data')
-            plt.plot(self.data[0], self.interpolation(self.data[0]), '-', label='Interpolated curve')
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            plt.legend()
-            plt.show()
+        plt.figure(figsize=(10, 6))
+        plt.title('Interpolation of data: ' + self.fileName)
+        plt.plot(self.rawdata[0], self.rawdata[1], 'o', label='Original data')
+        plt.plot(self.data[0], self.interpolation(self.data[0]), '-', label='Interpolated curve')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.legend()
+        plt.show()
 
     def save_file(self, new_file_name=None):
         # 如果需要，保存处理后的数据到新的文件
@@ -205,10 +232,41 @@ class myInterpolation:
 
     def process(self):
         # 执行所有步骤
-
-        self.plot_data()
+        if self.plot:
+            self.plot_data()
         return self.getInterpolation() # 返回插值函数
 
+    def _apply_operation(self, other, operation):
+        if isinstance(other, (float, int)):
+            new_data = self.data.copy()
+            new_data[1] = operation(new_data[1], other)
+        elif isinstance(other, myInterpolation):
+            new_data = self.data.copy()
+            new_data[1] = operation(new_data[1], other.data[1])
+        else:
+            raise TypeError(f"Unsupported operand type(s) for operation: 'myInterpolation' and '{type(other).__name__}'")
+
+        new_interpolation = myInterpolation(
+            source_data=self.source_data,
+            smooth_window=self.smooth_window,
+            plot=self.plot,
+            isregularize=self.isregularize
+        )
+        new_interpolation.data = new_data
+        new_interpolation.do_interpolat()
+        return new_interpolation
+
+    def __mul__(self, other):
+        return self._apply_operation(other, lambda x, y: x * y)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __add__(self, other):
+        return self._apply_operation(other, lambda x, y: x + y)
+
+    def __sub__(self, other):
+        return self._apply_operation(other, lambda x, y: x - y)
 
 
 def calculate_weighted_average(func1, func2):
@@ -234,14 +292,15 @@ def calculate_weighted_average(func1, func2):
 if __name__ == '__main__':
     # 测试代码
     # 读取两个文件
-    QE = 'MyScienceTools\spectrum\QE\QE_R6233_03.csv'
-    EM = 'MyScienceTools\spectrum\scintillator_实测\Em_GAGG140ns.txt'
+    import os, sys 
+    os.chdir(os.path.dirname(sys.argv[0]))
+    QE = r'..\spectrum\QE\QE_R6233_RL0840.csv'
+    EM = r'..\spectrum\scintillator_实测\Em_GAGG140ns.txt'
 
     # ReadData(QE) # auto read
     # ReadData(QE, sep='\t', skiprows=10) # manual read
     # 创建两个插值对象
-    inter1 = myInterpolation(ReadData(EM), plot=False,smooth_window=1).process()
-    inter2 = myInterpolation(ReadData(QE), plot=False,smooth_window=1)
-
+    inter1 = myInterpolation(ReadData(EM), plot=False,smooth_window=1)*2
+    inter2 = myInterpolation(ReadData(QE), plot=False,smooth_window=1).process()
     # # 计算加权平均值
-    calculate_weighted_average(inter1, inter2.getInterpolation())
+    calculate_weighted_average(inter1.getInterpolation(), inter2)
