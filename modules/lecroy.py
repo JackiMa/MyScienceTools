@@ -94,6 +94,7 @@ class LeCroyDATA:
         self.data_type = None
         self.acquisition_time = None
         self.bins = None
+        self.processed_data_is_binned = False
         
         # 存储处理后的数据
         self.processed_data = None
@@ -177,41 +178,81 @@ class LeCroyDATA:
 
         return data
 
-    def process_data(self, isregularize='none', rebin_factor=None):
+    def process_data(self, isregularize='none'):
         """处理数据，每次处理都基于原始数据"""
         if self.raw_data is None:
             return None, None, None, None
             
         # 数据处理总是从原始数据开始
-        self.data = self.raw_data.copy()
+        # Create a working copy, don't modify self.data directly until the end
+        current_data = self.raw_data.copy()
+        self.processed_data_is_binned = False # Reset flag at the start of processing
         
-        # 确定适当的单位
-        self._determine_units()
+        # 确定适当的单位 (using the original data for unit determination)
+        self._determine_units() # Sets self.xfactor, self.unitX, self.unitY based on raw data
         
-        # 处理数据
-        x = self.data[:,0] * self.xfactor
-        y = self.data[:,1] * self.yfactor
+        # Apply scaling factors
+        x = current_data[:,0] * self.xfactor
+        y = current_data[:,1] * self.yfactor
 
-        # 归一化处理
+        # Rebin处理（仅针对能谱，如果self.bins已设置）
+        if self.isSpectrum and self.bins is not None:
+            try:
+                # Ensure bins is a positive integer
+                num_bins = int(self.bins)
+                if num_bins <= 0:
+                    raise ValueError("Number of bins must be a positive integer.")
+                
+                # Perform histogramming
+                hist, bin_edges = np.histogram(x, bins=num_bins, weights=y, range=(x.min(), x.max()))
+                
+                # Update x to bin centers and y to counts
+                x = (bin_edges[:-1] + bin_edges[1:]) / 2
+                y = hist
+                self.processed_data_is_binned = True # Mark data as binned
+                print(f"Data rebinned into {num_bins} bins.") # Debug message
+
+            except Exception as e:
+                print(f"Warning: Could not rebin data: {e}. Using original binning.")
+                self.processed_data_is_binned = False
+
+        # 归一化处理 (applied to potentially binned data)
         if isregularize == 'MaxY':
-            y = y / np.max(y)
+            # Avoid division by zero if max is zero
+            max_y = np.max(y)
+            if max_y > 0:
+                y = y / max_y
+            else:
+                print("Warning: MaxY normalization failed, max(y) is zero.")
         elif isregularize == 'Area':
-            y = y / np.trapz(y, x)
+            # Avoid division by zero if area is zero
+            area = np.trapz(y, x)
+            if area != 0:
+                y = y / area
+            else:
+                print("Warning: Area normalization failed, integral is zero.")
         elif isregularize == 'MinMax':
-            y = (y - np.min(y)) / (np.max(y) - np.min(y))
+            min_y = np.min(y)
+            max_y = np.max(y)
+            range_y = max_y - min_y
+            if range_y > 0:
+                y = (y - min_y) / range_y
+            else:
+                print("Warning: MinMax normalization failed, max(y) equals min(y).")
         elif isregularize == 'Z-Score':
-            y = (y - np.mean(y)) / np.std(y)
+            std_y = np.std(y)
+            if std_y > 0:
+                y = (y - np.mean(y)) / std_y
+            else:
+                print("Warning: Z-Score normalization failed, std(y) is zero.")
         elif isregularize == 'TotalY':
-            y = y / np.sum(y)
+            sum_y = np.sum(y)
+            if sum_y > 0:
+                y = y / sum_y
+            else:
+                print("Warning: TotalY normalization failed, sum(y) is zero.")
         elif isregularize != 'none':
             print(f"Unknown normalization method {isregularize}, no normalization applied.")
-        
-        # Rebin处理（仅针对能谱）
-        if self.isSpectrum and rebin_factor is not None:
-            if self.bins is None:
-                self.bins = len(x) // rebin_factor if rebin_factor else len(x)
-            
-            # 这里我们不实际重新分bin，只是设置bins参数，在绘图时使用
             
         # 存储处理后的数据
         self.processed_x = x
@@ -261,19 +302,17 @@ class LeCroyDATA:
                     self.xfactor = 1
                     self.unitX = 'Time [s]'
 
-    def scidata_process(self, isregularize='none', rebin_factor=None):
+    def scidata_process(self, isregularize='none'):
         """处理数据并返回处理后的数据"""
-        return self.process_data(isregularize, rebin_factor)
+        return self.process_data(isregularize)
 
-    def plot(self, isregularize='none', rebin_factor=10, save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), **kwargs):
+    def plot(self, isregularize='none', save_path=None, logPlot=False, title=None, style=None, figsize=(5, 4), **kwargs):
         """Plot waveform or spectrum
         
         Parameters:
         -----------
         isregularize : str, optional
             Normalization method ('none', 'MaxY', 'Area', 'MinMax', 'Z-Score', 'TotalY')
-        rebin_factor : int, optional
-            Factor to rebin the data (only for spectra)
         save_path : str, optional
             Path to save the plot
         logPlot : str, optional
@@ -289,18 +328,27 @@ class LeCroyDATA:
         """
         print("Normalization method: ", isregularize)
         
-        # 处理数据
-        x, y, unitX, unitY = self.process_data(isregularize, rebin_factor)
+        # 处理数据以确保使用最新的设置 (e.g., bins)
+        x, y, unitX, unitY = self.process_data(isregularize)
         
         # Create figure with style
         fig = setup_figure(figsize=figsize, style=style)
         
-        # Plot based on data type
+        # Plot based on data type and whether it was binned
         if self.isSpectrum: 
-            if self.bins is None:
-                self.bins = len(self.data)  # Use number of data points as bins
-            plt.hist(x, weights=y, bins=self.bins, histtype='step', **kwargs)
+            if self.processed_data_is_binned:
+                # Plot pre-binned data using steps
+                plt.plot(x, y, drawstyle='steps-mid', **kwargs)
+            else:
+                # Data wasn't binned in process_data, use original points with hist
+                # Need raw x values for hist if not binned
+                raw_x_scaled = self.raw_data[:,0] * self.xfactor
+                raw_y_scaled = self.raw_data[:,1] * self.yfactor
+                # Use number of original points as bins if not specified otherwise
+                bins_to_use = self.bins if self.bins is not None else len(raw_x_scaled)
+                plt.hist(raw_x_scaled, weights=raw_y_scaled, bins=bins_to_use, histtype='step', **kwargs)
         else:
+            # Waveform data (always use plot)
             plt.plot(x, y, **kwargs)
             
         # Set labels - 可被后续调用覆盖
@@ -360,13 +408,21 @@ class LeCroyDATA:
         return metrics
 
     def set_bins(self, bins=None):
-        """设置能谱的bin数量"""
+        """设置能谱的bin数量，并重新处理数据"""
         if self.isSpectrum:
             if bins is None:
-                # 使用原始数据的分bin方式
-                self.bins = len(self.data)
+                self.bins = None # Reset to default (use original data points)
             else:
-                self.bins = bins
+                try:
+                    num_bins = int(bins)
+                    if num_bins <= 0:
+                        raise ValueError("Number of bins must be a positive integer.")
+                    self.bins = num_bins
+                except ValueError as e:
+                    print(f"Error setting bins: {e}. Keeping previous value ({self.bins}).")
+                    return # Don't reprocess if value is invalid
+            
+            self.process_data() # Use default normalization ('none')
         else:
             print("Warning: set_bins() is only applicable for spectrum data.")
 
@@ -387,38 +443,68 @@ class SpectrumAnalyzer:
     def __init__(self, data_dir, sigma=None):
         self.data_dir = data_dir
         self.lecroy_data = LeCroyDATA(data_dir)
-        self.xdata, self.ydata, self.unitX, self.unitY = self.lecroy_data.get_data(processed=True)
         self.peaks_index = None
         self.data_width = None
         self.sigma = sigma  # 自定义sigma值
-        self.isSpectrum = self.lecroy_data.isSpectrum
         self.fitted_peaks = {} # 存储拟合后的峰位，key为峰位，value为(popt, perr)
+
+    @property
+    def xdata(self):
+        """Dynamically get processed x data from LeCroyDATA."""
+        x, _, _, _ = self.lecroy_data.get_data(processed=True)
+        return x
+
+    @property
+    def ydata(self):
+        """Dynamically get processed y data from LeCroyDATA."""
+        _, y, _, _ = self.lecroy_data.get_data(processed=True)
+        return y
+
+    @property
+    def unitX(self):
+        """Dynamically get x unit from LeCroyDATA."""
+        _, _, unitX, _ = self.lecroy_data.get_data(processed=True)
+        return unitX
+
+    @property
+    def unitY(self):
+        """Dynamically get y unit from LeCroyDATA."""
+        _, _, _, unitY = self.lecroy_data.get_data(processed=True)
+        return unitY
+
+    @property
+    def isSpectrum(self):
+        """Dynamically get isSpectrum flag from LeCroyDATA."""
+        return self.lecroy_data.isSpectrum
 
     def _getFilterSigma(self):
         """根据数据结构找到合适的滤波参数sigma"""
+        # Access data via properties
         spectrum = self.ydata
-        centroid = np.average(self.xdata, weights=spectrum)
+        xdata = self.xdata
+        centroid = np.average(xdata, weights=spectrum)
 
         # 初始化包含的ydata计数的总和
         count_sum = 0
 
         # 找到重心在xdata中的位置
-        centroid_index = (np.abs(self.xdata - centroid)).argmin()
+        centroid_index = (np.abs(xdata - centroid)).argmin()
 
         # 从重心处开始，向两边扩展
         left_index = right_index = centroid_index
-        delta_step = len(self.xdata) // 200
+        delta_step = len(xdata) // 200
         while count_sum < sum(spectrum) * 0.95:
             if left_index > delta_step:
                 left_index -= delta_step
-            if right_index < len(self.xdata) - delta_step:
+            if right_index < len(xdata) - delta_step:
                 right_index += delta_step
-            if left_index <= delta_step and right_index >= len(self.xdata) - delta_step:
+            if left_index <= delta_step and right_index >= len(xdata) - delta_step:
                 break
             count_sum = sum(spectrum[left_index:right_index+1])
 
         # 始终计算数据宽度，无论是否使用自定义sigma
-        self.data_width = self.xdata[right_index] - self.xdata[left_index]
+        # Access data via properties
+        self.data_width = xdata[right_index] - xdata[left_index]
         
         # 使用自定义sigma或计算sigma
         if self.sigma is not None:
@@ -442,14 +528,18 @@ class SpectrumAnalyzer:
 
     def _fit_gaussian(self, peak, spectrum, x_index):
         """对单个峰进行高斯拟合"""
+        # Access data via properties
+        xdata = self.xdata
+        ydata = self.ydata
+        
         # 定义拟合范围
-        fit_range = float(0.5 * np.sqrt(abs(peak))) * np.sqrt(self.xdata[-1] - self.xdata[0]) * 0.1
+        fit_range = float(0.5 * np.sqrt(abs(peak))) * np.sqrt(xdata[-1] - xdata[0]) * 0.1
         if self.data_width is None:
             self._getFilterSigma()  # 确保data_width已计算
         fit_range = max(fit_range, self.data_width * 0.01)  # 最小取数据宽度的1%
         
-        start = max(self.xdata[0], peak - fit_range)
-        end = min(self.xdata[-1], peak + fit_range)
+        start = max(xdata[0], peak - fit_range)
+        end = min(xdata[-1], peak + fit_range)
         
         start_index = self._value_to_index(start)
         end_index = max(self._value_to_index(end), start_index+1)
@@ -457,19 +547,19 @@ class SpectrumAnalyzer:
         
         # 设置拟合边界和初值
         lb = [0, 0.5*start, -np.inf, -np.inf, -np.inf]
-        ub = [1.5*max(self.ydata), 2*end, np.inf, np.inf, np.inf]
+        ub = [1.5*max(ydata), 2*end, np.inf, np.inf, np.inf]
         x0 = [spectrum[peak_index], peak, 1/2*fit_range, 0, 0]
         
         # 第一次拟合
         try:
-            popt1, pcov1 = curve_fit(self._gaussian_plus_linear, self.xdata[start_index:end_index], 
+            popt1, pcov1 = curve_fit(self._gaussian_plus_linear, xdata[start_index:end_index],
                                      spectrum[start_index:end_index], p0=x0, bounds=(lb, ub), maxfev=5000)
         except RuntimeError:
             print(f"峰位 {peak} 第一次拟合失败")
             return None
 
         # 计算第一次拟合的chi2/ndof
-        expected_value1 = self._gaussian_plus_linear(self.xdata[start_index:end_index], *popt1)
+        expected_value1 = self._gaussian_plus_linear(xdata[start_index:end_index], *popt1)
         residuals1 = spectrum[start_index:end_index] - expected_value1
         chi2_1 = np.sum(residuals1**2 / expected_value1)
         ndof1 = len(residuals1) - len(popt1)
@@ -483,14 +573,14 @@ class SpectrumAnalyzer:
         peak = popt1[1]
         fit_range = min(abs(7 * popt1[2]), 1.5*fit_range)
         
-        start = max(self.xdata[0], popt1[1] - 0.9*fit_range)
-        end = min(self.xdata[-1], popt1[1] + 1.1*fit_range)
+        start = max(xdata[0], popt1[1] - 0.9*fit_range)
+        end = min(xdata[-1], popt1[1] + 1.1*fit_range)
         start_index = self._value_to_index(start)
         end_index = self._value_to_index(end)
         
         # 第二次拟合
         try:
-            popt2, pcov2 = curve_fit(self._gaussian_plus_linear, self.xdata[start_index:end_index], 
+            popt2, pcov2 = curve_fit(self._gaussian_plus_linear, xdata[start_index:end_index],
                                      spectrum[start_index:end_index], 
                                      p0=[spectrum[peak_index], peak, 1/2*fit_range, 0, 0], 
                                      bounds=(lb, ub), maxfev=5000)
@@ -499,7 +589,7 @@ class SpectrumAnalyzer:
             return popt1, perr1, chi2_1, ndof1, start_index1, end_index1
 
         # 计算第二次拟合的chi2/ndof
-        expected_value2 = self._gaussian_plus_linear(self.xdata[start_index:end_index], *popt2)
+        expected_value2 = self._gaussian_plus_linear(xdata[start_index:end_index], *popt2)
         residuals2 = spectrum[start_index:end_index] - expected_value2
         chi2_2 = np.sum(residuals2**2 / expected_value2)
         ndof2 = len(residuals2) - len(popt2)
@@ -574,6 +664,7 @@ class SpectrumAnalyzer:
         fig = setup_figure(figsize=figsize, style=style)
         
         # Plot spectrum (without label)
+        # Access data via properties
         if self.isSpectrum:
             plt.hist(self.xdata, weights=spectrum, bins=len(self.xdata), histtype='step', **kwargs)
         else:
@@ -585,7 +676,8 @@ class SpectrumAnalyzer:
             popt, perr, chi2, ndof, start, end = result
             fit_label = format_fit_label(popt[1], perr[1], popt[2], perr[2], chi2, ndof)
             color = colors[(i + 1) % len(colors)]  # 使用不同于数据的颜色
-            plt.plot(self.xdata[start:end], self._gaussian_plus_linear(self.xdata[start:end], *popt), 
+            # Access data via property
+            plt.plot(self.xdata[start:end], self._gaussian_plus_linear(self.xdata[start:end], *popt),
                     '-', color=color, linewidth=1, label=fit_label)
             
             # Store the fitted peak for future reference
@@ -593,6 +685,7 @@ class SpectrumAnalyzer:
             
             # 直接标注每个拟合峰
             if show_annotations:
+                # Access data via property
                 peak_index = np.abs(self.xdata - popt[1]).argmin()
                 peak_x = popt[1]  # 使用拟合得到的峰值
                 peak_y = spectrum[peak_index]
@@ -614,6 +707,7 @@ class SpectrumAnalyzer:
         configure_legend()
         
         # Set axes labels and title
+        # Access data via properties
         set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=title)
         
         # Set log scale
@@ -657,12 +751,16 @@ class SpectrumAnalyzer:
         if right - left < 1:
             raise ValueError("Fit range too small, please select a larger range.")
 
+        # Access data via properties
+        xdata = self.xdata
+        ydata = self.ydata
+
         # Set initial parameters
         amp, mean, stddev, slope, intercept = p0
         if amp == 1:
-            amp = 0.6 * max(self.ydata[left:right])
+            amp = 0.6 * max(ydata[left:right])
         if mean == 0:
-            mean = self.xdata[left + np.argmax(self.ydata[left:right])]
+            mean = xdata[left + np.argmax(ydata[left:right])]
         if stddev == 1:
             stddev = (right - left) * 0.1
 
@@ -670,13 +768,17 @@ class SpectrumAnalyzer:
 
         try:
             # Perform fit
-            popt, pcov = curve_fit(self._gaussian_plus_linear, self.xdata[left:right], self.ydata[left:right], p0=p0)
+            # Access data via properties
+            popt, pcov = curve_fit(self._gaussian_plus_linear, xdata[left:right], ydata[left:right], p0=p0)
             perr = np.sqrt(np.diag(pcov))
 
             # Calculate goodness of fit
-            residuals = self.ydata[left:right] - self._gaussian_plus_linear(self.xdata[left:right], *popt)
-            chi2 = np.sum((residuals ** 2) / self._gaussian_plus_linear(self.xdata[left:right], *popt))
-            Ndof = len(self.xdata[left:right]) - len(popt)
+            # Access data via properties
+            residuals = ydata[left:right] - self._gaussian_plus_linear(xdata[left:right], *popt)
+            # Access data via properties
+            chi2 = np.sum((residuals ** 2) / self._gaussian_plus_linear(xdata[left:right], *popt))
+            # Access data via properties
+            Ndof = len(xdata[left:right]) - len(popt)
 
             # Store fitted peak
             self.fitted_peaks[popt[1]] = (popt, perr)
@@ -692,20 +794,24 @@ class SpectrumAnalyzer:
         fig = setup_figure(figsize=figsize, style=style)
         
         # Plot data
+        # Access data via properties
         if self.isSpectrum:
-            plt.hist(self.xdata, weights=self.ydata, bins=len(self.xdata), histtype='step', **kwargs)
+            plt.hist(xdata, weights=ydata, bins=len(xdata), histtype='step', **kwargs)
         else:
-            plt.plot(self.xdata, self.ydata, **kwargs)
+            plt.plot(xdata, ydata, **kwargs)
         
         # Plot fit
         if 'popt' in locals():
-            plt.plot(self.xdata[left:right], self._gaussian_plus_linear(self.xdata[left:right], *popt), 
-                     '-', linewidth=2.5, label=fit_label)
+            # Access data via properties
+            plt.plot(xdata[left:right], self._gaussian_plus_linear(xdata[left:right], *popt), 
+                     '-', linewidth=1, label=fit_label)
         else:
-            plt.plot(self.xdata[left:right], self.ydata[left:right], 'r', label='Fit range')
+            # Access data via properties
+            plt.plot(xdata[left:right], ydata[left:right], 'r', label='Fit range')
         
         # Configure legend and labels
         configure_legend()
+        # Access data via properties
         set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=plot_title)
 
         # Finalize and show/save
@@ -756,20 +862,26 @@ class SpectrumAnalyzer:
         Returns:
         tuple: (fig, ax) matplotlib figure and axes objects if save_path is None
         """
+        # Access data via properties
         spectrum = self.ydata
+        xdata = self.xdata
+        unitX = self.unitX
+        unitY = self.unitY
+        isSpectrum = self.isSpectrum
+        
         x_index = np.arange(len(spectrum))
         
         # Create figure with style
         fig = setup_figure(figsize=figsize, style=style)
         
         # Plot based on data type
-        if self.isSpectrum:
-            plt.hist(self.xdata, weights=spectrum, bins=len(self.xdata), histtype='step', **kwargs)
+        if isSpectrum:
+            plt.hist(xdata, weights=spectrum, bins=len(xdata), histtype='step', **kwargs)
         else:
-            plt.plot(self.xdata, spectrum, **kwargs)
+            plt.plot(xdata, spectrum, **kwargs)
             
         # Set axes labels and title
-        set_axes_labels(xlabel=self.unitX, ylabel=self.unitY, title=title)
+        set_axes_labels(xlabel=unitX, ylabel=unitY, title=title)
         
         # Set log scale
         if logPlot:
@@ -856,7 +968,7 @@ if __name__ == "__main__":
     print(f"单位: {unit_x}, {unit_y}")
     
     # 应用不同的处理并获取数据
-    data.process_data(isregularize='MaxY', rebin_factor=20)
+    data.process_data(isregularize='MaxY')
     norm_x, norm_y, _, _ = data.get_data(processed=True)
     print(f"归一化数据: min={norm_y.min():.2f}, max={norm_y.max():.2f}")
     
